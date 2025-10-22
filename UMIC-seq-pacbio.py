@@ -57,7 +57,7 @@ def run_umi_extraction(args):
         "-i", args.input,
         "-o", args.output,
         "--probe", args.probe,
-        "--umi_loc", "down",  # UMI is downstream of probe
+        "--umi_loc", args.umi_loc,  # Use the actual umi_loc parameter
         "--umi_len", str(args.umi_len),
         "--min_probe_score", "15"  # Use the working threshold
     ]
@@ -380,6 +380,7 @@ def run_full_pipeline(args):
         input=args.input,
         probe=args.probe,
         umi_len=args.umi_len,
+        umi_loc=args.umi_loc,
         output=umi_file
     )
     
