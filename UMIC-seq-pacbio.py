@@ -529,6 +529,19 @@ Examples:
     analyze_parser.add_argument('--reference', required=True, help='Reference FASTA file')
     analyze_parser.add_argument('--output', required=True, help='Output CSV file')
     
+    # NGS counting command
+    ngs_parser = subparsers.add_parser('ngs_count', help='Count pool reads per variant via UMI matching')
+    ngs_parser.add_argument('--pools_dir', required=True, help='Directory containing per-pool folders with R1/R2 fastqs')
+    ngs_parser.add_argument('--consensus_dir', required=True, help='Consensus directory (from consensus step)')
+    ngs_parser.add_argument('--variants_dir', required=True, help='Variants directory with per-consensus VCFs')
+    ngs_parser.add_argument('--probe', required=True, help='Probe FASTA file (same used for UMI extraction)')
+    ngs_parser.add_argument('--reference', required=True, help='Reference FASTA file for amino acid mapping')
+    ngs_parser.add_argument('--umi_len', type=int, default=52, help='UMI length (default: 52)')
+    ngs_parser.add_argument('--umi_loc', type=str, default='up', choices=['up','down'], help='UMI location relative to probe (default: up)')
+    ngs_parser.add_argument('--output', required=True, help='Output counts CSV file')
+    ngs_parser.add_argument('--left_ignore', type=int, default=22, help='Bases to ignore from start of assembled read (default: 22)')
+    ngs_parser.add_argument('--right_ignore', type=int, default=24, help='Bases to ignore from end of assembled read (default: 24)')
+    
     args = parser.parse_args()
     
     if not args.command:
@@ -556,6 +569,23 @@ Examples:
         success = run_variant_calling(args)
     elif args.command == 'analyze':
         success = run_analysis(args)
+    elif args.command == 'ngs_count':
+        print("=" * 60)
+        print("NGS POOL COUNTING")
+        print("=" * 60)
+        from ngs_count import run_ngs_count
+        success = run_ngs_count(
+            args.pools_dir,
+            args.consensus_dir,
+            args.variants_dir,
+            args.probe,
+            args.umi_len,
+            args.umi_loc,
+            args.output,
+            args.reference,
+            args.left_ignore,
+            args.right_ignore
+        )
     else:
         print(f"❌ Unknown command: {args.command}")
         return 1
