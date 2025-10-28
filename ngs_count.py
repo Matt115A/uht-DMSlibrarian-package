@@ -18,6 +18,9 @@ import gzip
 from pathlib import Path
 from typing import Dict, List, Tuple, Iterable
 import traceback
+import subprocess
+from Bio import SeqIO
+from Bio.Seq import Seq
 
 # Force immediate output - write directly to stderr if needed
 if hasattr(sys.stdout, 'reconfigure'):
@@ -48,6 +51,32 @@ def reverse_complement(seq: str) -> str:
     return seq.translate(comp)[::-1]
 
 
+def find_approx(query: str, target: str, max_mismatch: int) -> int:
+    """Return start index of first occurrence of query in target allowing up to max_mismatch mismatches; -1 if not found."""
+    q = query.upper()
+    t = target.upper()
+    qlen = len(q)
+    tlen = len(t)
+    if qlen == 0 or qlen > tlen:
+        return -1
+    # Fast exact pass first
+    pos = t.find(q)
+    if pos != -1:
+        return pos
+    # Sliding Hamming window
+    for i in range(0, tlen - qlen + 1):
+        window = t[i:i+qlen]
+        mism = 0
+        for a, b in zip(q, window):
+            if a != b:
+                mism += 1
+                if mism > max_mismatch:
+                    break
+        if mism <= max_mismatch:
+            return i
+    return -1
+
+
 def load_probe_sequences(probe_fasta: str) -> Tuple[str, str]:
     """Load probe FASTA (single record)."""
     with open(probe_fasta, 'r') as f:
@@ -57,42 +86,50 @@ def load_probe_sequences(probe_fasta: str) -> Tuple[str, str]:
     return probe.upper(), reverse_complement(probe.upper())
 
 
-def extract_umi_from_read(seq: str, probe_fwd: str, probe_rev: str, umi_len: int, umi_loc: str) -> str:
-    """Extract UMI using exact probe match (fast). Returns '' if not found/invalid.
-    - umi_loc 'up': UMI upstream of probe
-    - umi_loc 'down': UMI downstream of probe
+def merge_trimmed_internal(s1: str, s2: str, left_ignore: int, right_ignore: int, min_overlap: int = 12) -> str:
+    """Create merged internal fragment from paired-end reads.
+    - Trim first 22 and last 24 bases from each
+    - Reverse-complement R2 internal
+    - Merge by maximal suffix/prefix overlap; fallback to concatenation
+    """
+    s1f = s1.upper()
+    s2f = s2.upper()
+    if len(s1f) <= left_ignore + right_ignore or len(s2f) <= left_ignore + right_ignore:
+        return ''
+    r1 = s1f[left_ignore:len(s1f) - right_ignore]
+    r2 = s2f[left_ignore:len(s2f) - right_ignore]
+    r2rc = reverse_complement(r2)
+    # find maximal overlap of r1 suffix with r2rc prefix
+    max_ol = 0
+    max_possible = min(len(r1), len(r2rc))
+    for ol in range(max_possible, min_overlap - 1, -1):
+        if r1.endswith(r2rc[:ol]):
+            max_ol = ol
+            break
+    if max_ol >= min_overlap:
+        return r1 + r2rc[max_ol:]
+    # also try the other orientation (if library orientation unexpected)
+    # overlap of r2rc suffix with r1 prefix
+    for ol in range(max_possible, min_overlap - 1, -1):
+        if r2rc.endswith(r1[:ol]):
+            max_ol = ol
+            return r2rc + r1[max_ol:]
+    # fallback concatenate
+    return r1 + r2rc
+
+
+def extract_umi_from_assembled(seq: str, umi_len: int, left_ignore: int, right_ignore: int) -> str:
+    """Extract UMI by removing first 22 and last 24 bases and returning the internal UMI-length substring.
+    For Illumina, UMI lives in the internal window. If trimmed internal is too short, return empty.
     """
     s = seq.upper()
-    # Try forward probe
-    pos = s.find(probe_fwd)
-    if pos != -1:
-        if umi_loc == 'up':
-            start = pos - umi_len
-            end = pos
-            if start >= 0:
-                return s[start:end]
-        else:
-            start = pos + len(probe_fwd)
-            end = start + umi_len
-            if end <= len(s):
-                return s[start:end]
+    if len(s) < left_ignore + right_ignore + umi_len:
         return ''
-    # Try reverse probe
-    pos = s.find(probe_rev)
-    if pos != -1:
-        if umi_loc == 'up':
-            # UMI is upstream relative to probe orientation; on reverse this is to the right
-            start = pos + len(probe_rev)
-            end = start + umi_len
-            if end <= len(s):
-                return reverse_complement(s[start:end])
-        else:
-            # downstream relative to probe orientation; on reverse this is to the left
-            start = pos - umi_len
-            end = pos
-            if start >= 0:
-                return reverse_complement(s[start:end])
-    return ''
+    internal = s[left_ignore:len(s)-right_ignore]
+    if len(internal) < umi_len:
+        return ''
+    # Return first umi_len bases from internal window
+    return internal[:umi_len]
 
 
 def load_consensus_fasta(consensus_dir: str) -> Dict[str, str]:
@@ -167,6 +204,31 @@ def read_vcf_variants(vcf_path: str) -> List[Tuple[str, int, str, str]]:
     return rows
 
 
+def read_vcf_haplotype(vcf_path: str) -> Tuple[str, List[Tuple[str, int, str, str]]]:
+    """Return a semicolon-joined, position-sorted mutation list and list of variant tuples.
+    Format per mutation: CHROM:POS:REF>ALT. Returns empty string if no variants.
+    """
+    muts = []
+    variants = []
+    if not os.path.exists(vcf_path):
+        return '', variants
+    with open(vcf_path, 'r') as f:
+        for line in f:
+            if not line or line.startswith('#'):
+                continue
+            parts = line.strip().split('\t')
+            if len(parts) < 5:
+                continue
+            chrom = parts[0] if parts[0] else parts[2]
+            pos = int(parts[1])
+            ref = parts[3]
+            alt = parts[4].split(',')[0]
+            variants.append((chrom, pos, ref, alt))
+            muts.append((pos, f"{chrom}:{pos}:{ref}>{alt}"))
+    muts.sort(key=lambda x: x[0])
+    return ';'.join(m for _, m in muts), variants
+
+
 def collect_all_variant_rows(variants_dir: str) -> Tuple[List[Tuple[str,int,str,str]], Dict[str, List[int]]]:
     """Return list of unique variant keys and mapping from consensus name to indices in that list."""
     unique: Dict[Tuple[str,int,str,str], int] = {}
@@ -187,6 +249,72 @@ def collect_all_variant_rows(variants_dir: str) -> Tuple[List[Tuple[str,int,str,
     for key, i in unique.items():
         rows[i] = key
     return rows, per_consensus
+
+
+def collect_haplotype_rows(variants_dir: str, ref_seq: str) -> Tuple[List[Tuple[str, str, str]], Dict[str, int]]:
+    """Return list of (consensus, mutations_str, aa_mutations_str) and mapping from consensus name to row index."""
+    rows: List[Tuple[str, str, str]] = []
+    index: Dict[str, int] = {}
+    ref = Seq(ref_seq)
+    
+    for fn in os.listdir(variants_dir):
+        if not fn.endswith('.vcf'):
+            continue
+        name = Path(fn).stem
+        vpath = os.path.join(variants_dir, fn)
+        muts_str, variants = read_vcf_haplotype(vpath)
+        
+        # Convert to amino acid mutations - prevariant neess fall within codon
+        codons: Dict[int, List[Tuple[int, str, str]]] = {}
+        for chrom, pos, ref_allele, alt_allele in variants:
+            pos_0 = pos - 1  # 0-based
+            codon_pos = pos_0 // 3
+            if codon_pos not in codons:
+                codons[codon_pos] = []
+            codons[codon_pos].append((pos_0, ref_allele, alt_allele))
+        
+        aa_muts = []
+        for codon_pos in sorted(codons.keys()):
+            codon_start = codon_pos * 3
+            if codon_start + 3 > len(ref):
+                # Codon extends beyond reference, skip this codon
+                continue
+            
+            wt_codon = str(ref[codon_start:codon_start + 3])
+            mut_codon = list(wt_codon)
+            
+            # Apply all mutations in this codon
+            valid = True
+            for pos_0, ref_allele, alt_allele in codons[codon_pos]:
+                if len(ref_allele) != 1 or len(alt_allele) != 1:
+                    valid = False
+                    break
+                rel_pos = pos_0 - codon_start
+                if rel_pos < 3 and pos_0 < len(ref) and ref[pos_0] == ref_allele:
+                    mut_codon[rel_pos] = alt_allele
+                else:
+                    valid = False
+                    break
+            
+            if not valid:
+                # Fallback: record as codon number (amino acid position)
+                wt_aa = str(Seq(wt_codon).translate())
+                aa_muts.append(f"{wt_aa}{codon_pos + 1}X")
+                continue
+            
+            mut_codon_str = ''.join(mut_codon)
+            wt_aa = str(Seq(wt_codon).translate())
+            mut_aa = str(Seq(mut_codon_str).translate())
+            
+            if wt_aa != mut_aa:
+                # Non-synonymous - record as amino acid
+                aa_muts.append(f"{wt_aa}{codon_pos + 1}{mut_aa}")
+            # Skip synonymous mutations (silent changes)
+        
+        aa_muts_str = '+'.join(aa_muts) if aa_muts else 'WT'
+        rows.append((name, muts_str, aa_muts_str))
+        index[name] = len(rows) - 1
+    return rows, index
 
 
 def find_pool_folders(pools_dir: str) -> List[str]:
@@ -210,7 +338,8 @@ def find_r1_r2(folder: str) -> Tuple[str, str]:
 
 
 def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_fasta: str,
-                  umi_len: int, umi_loc: str, output_csv: str) -> bool:
+                  umi_len: int, umi_loc: str, output_csv: str, reference_fasta: str,
+                  left_ignore: int = 22, right_ignore: int = 24) -> bool:
     try:
         print("Starting...", flush=True)
         print("Loading probe sequences...", flush=True)
@@ -228,6 +357,11 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         print("Collecting variant rows...", flush=True)
         var_rows, per_consensus = collect_all_variant_rows(variants_dir)
         print(f"Found {len(var_rows)} unique variant rows across {len(per_consensus)} consensus", flush=True)
+        
+        print("Loading reference sequence...", flush=True)
+        ref_record = SeqIO.read(reference_fasta, "fasta")
+        ref_seq = str(ref_record.seq)
+        print(f"Reference length: {len(ref_seq)} bp", flush=True)
 
         print(f"Finding pool folders in: {pools_dir}", flush=True)
         pool_folders = find_pool_folders(pools_dir)
@@ -239,6 +373,9 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         return False
 
     counts = [[0 for _ in pool_folders] for _ in range(len(var_rows))]
+    # Haplotype rows (consensus-level, preserve multi-mutations)
+    hap_rows, hap_index = collect_haplotype_rows(variants_dir, ref_seq)
+    hap_counts = [[0 for _ in pool_folders] for _ in range(len(hap_rows))]
 
     for j, pool in enumerate(pool_folders):
         pool_name = pool_names[j]
@@ -250,32 +387,76 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         print(f"  R1: {Path(r1).name}")
         print(f"  R2: {Path(r2).name}")
         
+        # Prefer PEAR merging for robust overlap handling
+        assembled_fastq = os.path.join(pool, f"{pool_name}_assembled.fastq")
+        try:
+            print("  Merging with PEAR...", flush=True)
+            # PEAR outputs: .assembled.fastq, .unassembled.forward.fastq, .unassembled.reverse.fastq
+            # We'll write to pool folder with prefix pool_name
+            prefix = os.path.join(pool, pool_name)
+            cmd = [
+                'pear',
+                '-f', r1,
+                '-r', r2,
+                '-o', prefix,
+                '-q', '20',
+                '-t', '100'
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assembled_fastq = prefix + '.assembled.fastq'
+            if not os.path.exists(assembled_fastq):
+                print("  WARNING: PEAR did not produce assembled reads; falling back to on-the-fly merge")
+                assembled_fastq = ''
+        except Exception as e:
+            print(f"  WARNING: PEAR merge failed ({e}); falling back to on-the-fly merge")
+            assembled_fastq = ''
+
         read_count = 0
         umi_extracted = 0
         umi_matched = 0
-        
-        # Stream paired reads in lockstep
-        for s1, s2 in zip(read_fastq_sequences(r1), read_fastq_sequences(r2)):
-            read_count += 1
-            if read_count % 100000 == 0:
-                print(f"  Processed {read_count:,} reads, extracted {umi_extracted}, matched {umi_matched}", end='\r')
-            
-            # Prefer R1 for UMI extraction; fallback to R2
-            umi = extract_umi_from_read(s1, probe_fwd, probe_rev, umi_len, umi_loc)
-            if not umi:
-                umi = extract_umi_from_read(s2, probe_fwd, probe_rev, umi_len, umi_loc)
-            if not umi:
-                continue
-            umi_extracted += 1
-            
-            cons_name = umi_index.get(umi)
-            if not cons_name:
-                continue
-            umi_matched += 1
-            
-            idxs = per_consensus.get(cons_name, [])
-            for i in idxs:
-                counts[i][j] += 1
+
+        if assembled_fastq:
+            print("  Scanning assembled reads for UMI/probe matches...", flush=True)
+            for seq in read_fastq_sequences(assembled_fastq):
+                read_count += 1
+                if read_count % 100000 == 0:
+                    print(f"  Processed {read_count:,} merged reads, extracted {umi_extracted}, matched {umi_matched}", end='\r')
+                umi = extract_umi_from_assembled(seq, umi_len, left_ignore, right_ignore)
+                if not umi:
+                    continue
+                umi_extracted += 1
+                cons_name = umi_index.get(umi)
+                if not cons_name:
+                    continue
+                umi_matched += 1
+                idxs = per_consensus.get(cons_name, [])
+                for i in idxs:
+                    counts[i][j] += 1
+                if cons_name in hap_index:
+                    hap_counts[hap_index[cons_name]][j] += 1
+        else:
+            # Fallback: stream paired reads and merge on the fly
+            for s1, s2 in zip(read_fastq_sequences(r1), read_fastq_sequences(r2)):
+                read_count += 1
+                if read_count % 100000 == 0:
+                    print(f"  Processed {read_count:,} reads, extracted {umi_extracted}, matched {umi_matched}", end='\r')
+                # Merge, trim and extract from merged
+                merged = merge_trimmed_internal(s1, s2, left_ignore, right_ignore)
+                if not merged:
+                    continue
+                umi = extract_umi_from_assembled(merged, umi_len, left_ignore, right_ignore)
+                if not umi:
+                    continue
+                umi_extracted += 1
+                cons_name = umi_index.get(umi)
+                if not cons_name:
+                    continue
+                umi_matched += 1
+                idxs = per_consensus.get(cons_name, [])
+                for i in idxs:
+                    counts[i][j] += 1
+                if cons_name in hap_index:
+                    hap_counts[hap_index[cons_name]][j] += 1
         
         print(f"\n  Pool {pool_name}: {read_count:,} reads, {umi_extracted} UMIs extracted, {umi_matched} matched to consensus")
 
@@ -286,6 +467,15 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         for i, key in enumerate(var_rows):
             chrom, pos, ref, alt = key
             row = [str(chrom), str(pos), ref, alt] + [str(counts[i][j]) for j in range(len(pool_folders))]
+            out.write(','.join(row) + '\n')
+    # Write haplotype counts
+    hap_csv = str(Path(output_csv).parent / 'pool_haplotype_counts.csv')
+    print(f"Writing haplotype counts to: {hap_csv}")
+    with open(hap_csv, 'w') as out:
+        header = ['CONSENSUS', 'MUTATIONS', 'AA_MUTATIONS'] + pool_names
+        out.write(','.join(header) + '\n')
+        for i, (cons_name, muts, aa_muts) in enumerate(hap_rows):
+            row = [cons_name, muts, aa_muts] + [str(hap_counts[i][j]) for j in range(len(pool_folders))]
             out.write(','.join(row) + '\n')
     
     print("Done!")
@@ -302,9 +492,10 @@ if __name__ == '__main__':
     ap.add_argument('--probe', required=True)
     ap.add_argument('--umi_len', type=int, required=True)
     ap.add_argument('--umi_loc', choices=['up','down'], required=True)
+    ap.add_argument('--reference', required=True, help='Reference FASTA file for amino acid mapping')
     ap.add_argument('--output', required=True)
     a = ap.parse_args()
-    ok = run_ngs_count(a.pools_dir, a.consensus_dir, a.variants_dir, a.probe, a.umi_len, a.umi_loc, a.output)
+    ok = run_ngs_count(a.pools_dir, a.consensus_dir, a.variants_dir, a.probe, a.umi_len, a.umi_loc, a.output, a.reference)
     sys.exit(0 if ok else 1)
 
 
