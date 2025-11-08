@@ -82,12 +82,19 @@ def run_clustering(args):
         description = "Fast UMI Clustering (CD-HIT)"
     else:
         # Use slow alignment-based clustering
+        # Convert aln_thresh from float (0.47) to integer alignment score (47)
+        # NOTE: This is NOT a percentage conversion! The value 0.47 represents a fraction
+        # that gets multiplied by 100 to yield an alignment score threshold (47).
+        # The alignment score is from skbio's local_pairwise_align_nucleotide, which uses
+        # default scoring: match=+2, mismatch=-1. For a 52bp UMI, perfect match ≈ 104.
+        # Threshold of 47 means ~45% of perfect match score, allowing many mismatches.
+        aln_thresh_int = int(args.aln_thresh * 100)
         cmd = [
             "python", "UMIC-seq.py", "clusterfull",
             "-i", args.input_umi,
             "-o", args.output_dir,
             "--reads", args.input_reads,
-            "--aln_thresh", str(int(args.aln_thresh * 100)),  # Convert to integer percentage
+            "--aln_thresh", str(aln_thresh_int),
             "--size_thresh", str(args.size_thresh)
         ]
         description = "Slow UMI Clustering (alignment-based)"
@@ -123,7 +130,7 @@ def run_consensus_generation(args):
     print(f"Found {total_clusters:,} cluster files to process")
     
     if total_clusters == 0:
-        print("❌ No cluster files found!")
+        print("No cluster files found!")
         return False
     
     # Track progress
@@ -385,7 +392,7 @@ def run_full_pipeline(args):
     )
     
     if not run_umi_extraction(extract_args):
-        print("❌ Pipeline failed at UMI extraction step")
+        print("Pipeline failed at UMI extraction step")
         return False
     
     # Step 2: Clustering
@@ -402,7 +409,7 @@ def run_full_pipeline(args):
     )
     
     if not run_clustering(cluster_args):
-        print("❌ Pipeline failed at clustering step")
+        print("Pipeline failed at clustering step")
         return False
     
     # Step 3: Consensus Generation
@@ -415,7 +422,7 @@ def run_full_pipeline(args):
     )
     
     if not run_consensus_generation(consensus_args):
-        print("❌ Pipeline failed at consensus generation step")
+        print("Pipeline failed at consensus generation step")
         return False
     
     # Step 4: Variant Calling
@@ -430,7 +437,7 @@ def run_full_pipeline(args):
     )
     
     if not run_variant_calling(variant_args):
-        print("❌ Pipeline failed at variant calling step")
+        print("Pipeline failed at variant calling step")
         return False
     
     # Step 5: Detailed Analysis
@@ -442,11 +449,11 @@ def run_full_pipeline(args):
     )
     
     if not run_analysis(analysis_args):
-        print("❌ Pipeline failed at analysis step")
+        print("Pipeline failed at analysis step")
         return False
     
     print(f"\n{'='*80}")
-    print("✅ PIPELINE COMPLETED SUCCESSFULLY!")
+    print("PIPELINE COMPLETED SUCCESSFULLY!")
     print(f"{'='*80}")
     print(f"Final output: {analysis_file}")
     print(f"Cluster directory: {cluster_dir}")
@@ -553,7 +560,7 @@ Examples:
     missing_scripts = [script for script in required_scripts if not os.path.exists(script)]
     
     if missing_scripts:
-        print(f"❌ Missing required scripts: {', '.join(missing_scripts)}")
+        print(f"Missing required scripts: {', '.join(missing_scripts)}")
         return 1
     
     # Run the appropriate command
@@ -587,7 +594,7 @@ Examples:
             args.right_ignore
         )
     else:
-        print(f"❌ Unknown command: {args.command}")
+        print(f"Unknown command: {args.command}")
         return 1
     
     return 0 if success else 1

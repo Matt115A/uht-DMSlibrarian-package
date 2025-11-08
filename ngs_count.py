@@ -477,6 +477,33 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         for i, (cons_name, muts, aa_muts) in enumerate(hap_rows):
             row = [cons_name, muts, aa_muts] + [str(hap_counts[i][j]) for j in range(len(pool_folders))]
             out.write(','.join(row) + '\n')
+
+    # Write counts merged on non-synonymous amino acid mutations
+    merged_csv = str(Path(output_csv).parent / 'merged_on_nonsyn_counts.csv')
+    print(f"Writing merged non-synonymous counts to: {merged_csv}")
+    merged: Dict[str, Dict[str, object]] = {}
+    for i, (cons_name, muts, aa_muts) in enumerate(hap_rows):
+        entry = merged.setdefault(aa_muts, {
+            'consensus': [],
+            'mutations': set(),
+            'counts': [0] * len(pool_folders)
+        })
+        entry['consensus'].append(cons_name)
+        if muts:
+            entry['mutations'].add(muts)
+        counts_row = entry['counts']
+        for j in range(len(pool_folders)):
+            counts_row[j] += hap_counts[i][j]
+
+    with open(merged_csv, 'w') as out:
+        header = ['AA_MUTATIONS', 'CONSENSUS_IDS', 'NUC_MUTATIONS'] + pool_names
+        out.write(','.join(header) + '\n')
+        for aa_muts in sorted(merged.keys()):
+            entry = merged[aa_muts]
+            consensus_ids = ';'.join(sorted(entry['consensus']))
+            nuc_muts = ';'.join(sorted(entry['mutations'])) if entry['mutations'] else ''
+            row = [aa_muts, consensus_ids, nuc_muts] + [str(c) for c in entry['counts']]
+            out.write(','.join(row) + '\n')
     
     print("Done!")
     return True
