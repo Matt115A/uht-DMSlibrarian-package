@@ -122,11 +122,9 @@ pip install dist/uht_DMSlibrarian-0.1.0-py3-none-any.whl
 
 - Package version: 0.1.0
 - Python requirement: >=3.7
-- Author: Paul Jannis Zurek (pjz26@cam.ac.uk)
+- Author: Matt Penner (mp957@cam.ac.uk)
 
 ## Notes
 
-- The package name uses a hyphen (`uht-DMSlibrarian`) but the Python module name uses an underscore (`uht_DMSlibrarian`) due to Python naming conventions.
-- All dependencies are frozen at specific versions from the original conda environment to ensure reproducibility.
 - The command-line tool `umic-seq-pacbio` is installed as a console script entry point.
 

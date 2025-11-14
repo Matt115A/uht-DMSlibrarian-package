@@ -15,7 +15,7 @@ __version__ = "0.1.0"
 setup(
     name="uht-DMSlibrarian",
     version=__version__,
-    description="Extension to the UMIC-seq PacBio Pipeline - Complete pipeline for processing PacBio data from raw FASTQ to detailed mutation analysis",
+    description="Extension of the UMIC-seq Pipeline - Complete pipeline for dictionary building and NGS count inetgration, with fitness calculations, error modelling and mutation analysis",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Matt Penner",
