@@ -5,7 +5,7 @@
 For dictinary generation from long reads, use the complete pipeline entry-point that handles the entire workflow from UMI extraction to final variant analysis:
 
 ```bash
-python UMIC-seq-pacbio.py all \
+umic-seq-pacbio all \
   --input reads.fastq.gz \
   --probe probe.fasta \
   --reference reference.fasta \
@@ -42,7 +42,7 @@ python UMIC-seq-pacbio.py all \
 
 **Example with custom parameters:**
 ```bash
-python UMIC-seq-pacbio.py all \
+umic-seq-pacbio all \
   --input reads.fastq.gz \
   --probe probe.fasta \
   --reference reference.fasta \
@@ -73,7 +73,7 @@ You can also run individual steps:
 
 ```bash
 # Extract UMIs
-python UMIC-seq-pacbio.py extract \
+umic-seq-pacbio extract \
   --input reads.fastq.gz \
   --probe probe.fasta \
   --umi_len 52 \
@@ -82,7 +82,7 @@ python UMIC-seq-pacbio.py extract \
   --min_probe_score 15
 
 # Cluster UMIs
-python UMIC-seq-pacbio.py cluster \
+umic-seq-pacbio cluster \
   --input_umi ExtractedUMIs.fasta \
   --input_reads reads.fastq.gz \
   --output_dir UMIclusterfull_fast \
@@ -90,14 +90,14 @@ python UMIC-seq-pacbio.py cluster \
   --size_thresh 10
 
 # Generate consensus sequences
-python UMIC-seq-pacbio.py consensus \
+umic-seq-pacbio consensus \
   --input_dir UMIclusterfull_fast \
   --output_dir consensus_results \
   --max_reads 20 \
   --max_workers 4
 
 # Call variants
-python UMIC-seq-pacbio.py variants \
+umic-seq-pacbio variants \
   --input_dir consensus_results \
   --reference reference.fasta \
   --output_dir variant_results \
@@ -105,7 +105,7 @@ python UMIC-seq-pacbio.py variants \
   --max_workers 4
 
 # Analyze variants
-python UMIC-seq-pacbio.py analyze \
+umic-seq-pacbio analyze \
   --input_vcf combined_variants.vcf \
   --reference reference.fasta \
   --output final_results.csv
@@ -127,7 +127,7 @@ Requirements:
 
 Usage:
 ```bash
-python UMIC-seq-pacbio.py ngs_count \
+umic-seq-pacbio ngs_count \
   --pools_dir /path/to/NGS_data \
   --consensus_dir /path/to/consensus \
   --variants_dir /path/to/variants \
@@ -175,7 +175,7 @@ The fitness analysis module processes `merged_on_nonsyn_counts.csv` to calculate
 
 **Usage:**
 ```bash
-python UMIC-seq-pacbio.py fitness \
+umic-seq-pacbio fitness \
   --input merged_on_nonsyn_counts.csv \
   --output_dir fitness_results/ \
   --input_pools pool1 pool2 \
@@ -213,7 +213,7 @@ python UMIC-seq-pacbio.py fitness \
 
 **Example with multiple input/output pairs:**
 ```bash
-python UMIC-seq-pacbio.py fitness \
+umic-seq-pacbio fitness \
   --input merged_on_nonsyn_counts.csv \
   --output_dir fitness_results/ \
   --input_pools input_pool1 input_pool2 \
