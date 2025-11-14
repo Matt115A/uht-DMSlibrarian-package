@@ -1,15 +1,14 @@
-# Dependencies for uht-DMSlibrarian v0.1.0
-# Minimum versions compatible with Python 3.7-3.11
-# For reproducibility, use: pip freeze > requirements-lock.txt
+# Frozen dependencies for uht-dmslibrarian v0.1.0
+# Exact versions from working conda environment
 
-biopython>=1.79,<2.0
-scikit-bio>=0.5.5,<0.8
-numpy>=1.21.0,<2.0
-pandas>=1.3.0,<3.0
-matplotlib>=3.5.0,<4.0
-seaborn>=0.11.0,<1.0
-scipy>=1.7.0,<2.0
-scikit-allel>=1.2.1,<2.0
-tqdm>=4.62.0
-psutil>=5.8.0
+biopython==1.86
+scikit-bio==0.7.0
+numpy==2.2.1
+pandas==2.3.3
+matplotlib==3.10.7
+seaborn==0.13.2
+scipy==1.15.3
+scikit-allel==1.3.13
+tqdm==4.67.1
+psutil==7.1.3
 

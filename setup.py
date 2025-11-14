@@ -13,7 +13,7 @@ long_description = readme_file.read_text() if readme_file.exists() else ""
 __version__ = "0.1.0"
 
 setup(
-    name="uht-DMSlibrarian",
+    name="uht-dmslibrarian",
     version=__version__,
     description="Extension of the UMIC-seq Pipeline - Complete pipeline for dictionary building and NGS count inetgration, with fitness calculations, error modelling and mutation analysis",
     long_description=long_description,
@@ -24,16 +24,16 @@ setup(
     packages=find_packages(),
     python_requires=">=3.7",
     install_requires=[
-        "biopython>=1.79,<2.0",
-        "scikit-bio>=0.5.5,<0.8",
-        "numpy>=1.21.0,<2.0",
-        "pandas>=1.3.0,<3.0",
-        "matplotlib>=3.5.0,<4.0",
-        "seaborn>=0.11.0,<1.0",
-        "scipy>=1.7.0,<2.0",
-        "scikit-allel>=1.2.1,<2.0",
-        "tqdm>=4.62.0",
-        "psutil>=5.8.0",
+        "biopython==1.86",
+        "scikit-bio==0.7.0",
+        "numpy==2.2.1",
+        "pandas==2.3.3",
+        "matplotlib==3.10.7",
+        "seaborn==0.13.2",
+        "scipy==1.15.3",
+        "scikit-allel==1.3.13",
+        "tqdm==4.67.1",
+        "psutil==7.1.3",
     ],
     entry_points={
         "console_scripts": [
