@@ -1,11 +1,28 @@
 GH11_epPCR_Test/
 GH98_cDMS/
 
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+dist/
+*.whl
+*.tar.gz
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+test_venv/
+
 # Temporary files
 *.log
 *.pdf
-__pycache__/
-*.pyc
 .DS_Store
 
 # Test files

@@ -20,20 +20,20 @@ setup(
     long_description_content_type="text/markdown",
     author="Matt Penner",
     author_email="mp957@cam.ac.uk",
-    url="https://github.com/yourusername/uht-DMSlibrarian",  # Update with actual URL if available
+    url="https://github.com/Matt115A/uht-DMSlibrarian-package",  # Update with actual URL if available
     packages=find_packages(),
     python_requires=">=3.7",
     install_requires=[
-        "biopython==1.74",
-        "scikit-bio==0.5.5",
-        "numpy==1.17.2",
-        "pandas==0.25.1",
-        "matplotlib==3.1.1",
-        "seaborn==0.9.0",
-        "scipy==1.3.1",
-        "scikit-allel==1.2.1",
-        "tqdm==4.54.1",
-        "psutil==5.6.3",
+        "biopython>=1.79,<2.0",
+        "scikit-bio>=0.5.5,<0.8",
+        "numpy>=1.21.0,<2.0",
+        "pandas>=1.3.0,<3.0",
+        "matplotlib>=3.5.0,<4.0",
+        "seaborn>=0.11.0,<1.0",
+        "scipy>=1.7.0,<2.0",
+        "scikit-allel>=1.2.1,<2.0",
+        "tqdm>=4.62.0",
+        "psutil>=5.8.0",
     ],
     entry_points={
         "console_scripts": [
@@ -44,11 +44,13 @@ setup(
         "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
-        "License :: OSI Approved :: MIT License",  # Update if different
+        "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
     ],
     keywords="bioinformatics pacbio umi sequencing variant calling",
 )
