@@ -4,13 +4,27 @@
 
 For dictinary generation from long reads, use the complete pipeline entry-point that handles the entire workflow from UMI extraction to final variant analysis:
 
+**Example with custom parameters:**
 ```bash
 umic-seq-pacbio all \
   --input reads.fastq.gz \
   --probe probe.fasta \
   --reference reference.fasta \
-  --output_dir /path/to/output
+  --output_dir /path/to/output \
+  --umi_len 52 \
+  --umi_loc up \
+  --min_probe_score 30 \
+  --identity 0.95 \
+  --size_thresh 15 \
+  --max_reads 30 \
+  --max_workers 8
 ```
+
+**External dependancies:**
+- `CD-HIT'
+- `Abpoa`
+
+Please install both of these and ensure they are in the PATH of your environment. Use e.g. conda to install these. 
 
 **Required Arguments:**
 - `--input`: Input FASTQ file (can be .gz compressed)
@@ -39,22 +53,6 @@ umic-seq-pacbio all \
 
 **Performance:**
 - `--max_workers` (default: 4): Number of parallel workers for consensus generation and variant calling. Increase for faster processing if you have more CPU cores available.
-
-**Example with custom parameters:**
-```bash
-umic-seq-pacbio all \
-  --input reads.fastq.gz \
-  --probe probe.fasta \
-  --reference reference.fasta \
-  --output_dir /path/to/output \
-  --umi_len 52 \
-  --umi_loc up \
-  --min_probe_score 30 \
-  --identity 0.95 \
-  --size_thresh 15 \
-  --max_reads 30 \
-  --max_workers 8
-```
 
 
 ### Pipeline Steps
@@ -169,9 +167,6 @@ The fitness analysis module processes `merged_on_nonsyn_counts.csv` to calculate
 - Calculates average fitness across all pairs
 - Bootstrap confidence intervals for fitness estimates (when multiple replicates available)
 - Generates mutability, epistasis, fitness distribution, reproducibility, and substitution matrix plots
-
-**Requirements:**
-- pandas, numpy, matplotlib, seaborn (typically available via conda/pip)
 
 **Usage:**
 ```bash
