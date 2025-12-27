@@ -1,5 +1,24 @@
 # uht-DMSlibrarian
 
+## Interactive GUI (IN DEV, STILL BUGGY!)
+
+The package includes a  web-based GUI for running the complete pipeline workflow interactively. Launch it with:
+
+```bash
+umic-seq-pacbio gui
+```
+
+This opens a web interface in your browser with three tabs:
+- **Pipeline**: Run the complete UMIC-seq PacBio pipeline from raw reads to variant analysis
+- **NGS Count**: Count Illumina reads per variant via UMI matching
+- **Fitness Analysis**: Calculate fitness from input/output pool comparisons
+
+**Options:**
+```bash
+umic-seq-pacbio gui --host 0.0.0.0 --port 7860  # Accessible from other devices
+umic-seq-pacbio gui --share  # Create a public share link (temporary)
+```
+
 ## Complete Pipeline
 
 For dictinary generation from long reads, use the complete pipeline entry-point that handles the entire workflow from UMI extraction to final variant analysis:

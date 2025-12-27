@@ -58,7 +58,7 @@ fullclus_parser.add_argument('-o', '--output', help='Folder name for output file
 fullclus_parser.add_argument('--reads', help='Fastq file of basecalled reads.', required=True)
 fullclus_parser.add_argument('--aln_thresh', type=int, help='Alignment threshold for clustering. UMIs with alignment scores higher than aln_thresh will be clustered.', required=True)
 fullclus_parser.add_argument('--size_thresh', type=int, help='Minimal size a cluster can have to be written to file.', required=True)
-fullclus_parser.add_argument('--probe', help='Probe sequence file (fasta format). If provided, sequences will be normalized to forward orientation before consensus generation.', required=False)
+fullclus_parser.add_argument('--probe', help='Probe sequence file (fasta format). NOTE: Orientation is determined during UMI extraction and stored in UMI headers. This argument is deprecated but kept for backward compatibility.', required=False)
 fullclus_parser.add_argument('--stop_thresh', type=int, default=5, required=False, help='Defaults to 5. Stops clustering if the average cluster size is smaller than this threshold. Essentially speeds up the clustering by dropping outliers. Set the threshold to 0 if you do not want the program to quit early!')
 fullclus_parser.add_argument('--stop_window', type=int, default=20, required=False, help='Defaults to 20. Sets the number of clusters to be used to calculate average cluster size.')
 
@@ -69,7 +69,7 @@ fastclus_parser.add_argument('-o', '--output', help='Folder name for output file
 fastclus_parser.add_argument('--reads', help='Fastq file of basecalled reads.', required=True)
 fastclus_parser.add_argument('--identity', type=float, default=0.90, help='Sequence identity threshold for clustering (0-1). Default: 0.90 (90%% identity)')
 fastclus_parser.add_argument('--size_thresh', type=int, help='Minimal size a cluster can have to be written to file.', required=True)
-fastclus_parser.add_argument('--probe', help='Probe sequence file (fasta format). If provided, sequences will be normalized to forward orientation before consensus generation.', required=False)
+fastclus_parser.add_argument('--probe', help='Probe sequence file (fasta format). NOTE: Orientation is determined during UMI extraction and stored in UMI headers. This argument is deprecated but kept for backward compatibility.', required=False)
 
 # Module-level variables that will be set when run as main
 args = None
@@ -278,39 +278,6 @@ def align_sequence(query_seq, target_seq):
         target_end_optimal=len(target_seq)
     )
 
-def normalize_sequence_orientation(sequence_str, probe_fwd, probe_rev, probe_minaln_score):
-    """
-    Determine sequence orientation and return normalized sequence (forward orientation).
-    
-    Args:
-        sequence_str: The sequence string to normalize
-        probe_fwd: Forward probe sequence
-        probe_rev: Reverse complement probe sequence
-        probe_minaln_score: Minimum alignment score threshold
-    
-    Returns:
-        tuple: (normalized_sequence_str, is_reverse_complemented)
-        - normalized_sequence_str: Sequence in forward orientation
-        - is_reverse_complemented: True if sequence was reverse-complemented, False otherwise
-    """
-    alnF = align_sequence_fast(probe_fwd, sequence_str)
-    alnR = align_sequence_fast(probe_rev, sequence_str)
-    scoreF = alnF.optimal_alignment_score
-    scoreR = alnR.optimal_alignment_score
-    
-    # Check if either alignment meets minimum score
-    if scoreF > probe_minaln_score or scoreR > probe_minaln_score:
-        if scoreF > scoreR:
-            # Forward orientation - return as-is
-            return sequence_str, False
-        else:
-            # Reverse orientation - reverse complement
-            return str(Seq(sequence_str).reverse_complement()), True
-    else:
-        # If neither alignment is strong enough, assume forward (conservative)
-        # This should be rare if probe sequences are correct
-        return sequence_str, False
-
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #UMI EXTRACTION
 #Extracts UMI in correct orientation
@@ -360,8 +327,10 @@ if __name__ == '__main__' and mode == 'UMIextract':
     # Estimate total sequences for progress tracking
     print("Estimating file size for progress tracking...")
     file_size = get_file_size(input_file)
-    # Rough estimate: ~200 bytes per sequence (including quality scores)
-    total_estimated = int(file_size / 200)
+    # Rough estimate: compressed FASTQ files are typically much smaller than uncompressed
+    # Based on empirical data, use ~1400 bytes per sequence for compressed files
+    # This accounts for compression ratios of 3-7x for typical sequencing data
+    total_estimated = int(file_size / 1400)
     print(f"Estimated {total_estimated:,} sequences in file")
     
     start_time = time.time()
@@ -388,8 +357,8 @@ if __name__ == '__main__' and mode == 'UMIextract':
                         #append to UMI to record list
                         if umi_end < len(alnF.target_sequence) and umi_begin > 0: #UMI could be out of bounds
                             umi = alnF.target_sequence[umi_begin:umi_end]
-                            # Write directly to output file instead of storing in memory
-                            output_handle.write(f">{record.id}\n{umi}\n")
+                            # Write directly to output file with orientation info in header
+                            output_handle.write(f">{record.id} orientation=forward\n{umi}\n")
                             success += 1
                         else:
                             short_aln += 1
@@ -402,9 +371,9 @@ if __name__ == '__main__' and mode == 'UMIextract':
                         #append to UMI to record list
                         if umi_begin > 0 and umi_end < len(alnR.target_sequence): #UMI could be out of bounds
                             umiR = alnR.target_sequence[umi_begin:umi_end]
-                            # Write directly to output file instead of storing in memory
+                            # Write directly to output file with orientation info in header
                             umi_revcomp = str(Seq(umiR).reverse_complement())
-                            output_handle.write(f">{record.id}\n{umi_revcomp}\n")
+                            output_handle.write(f">{record.id} orientation=reverse\n{umi_revcomp}\n")
                             success += 1
                         else:
                             short_aln += 1
@@ -613,17 +582,8 @@ if __name__ == '__main__' and mode == 'clustertest':
 def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, output_folder, probe_file=None, max_clusters=0, clussize_thresh=0, clussize_window=20):
     print("Beginning clustering...")
     
-    # Load probe sequences if provided for orientation normalization
-    probe_fwd = None
-    probe_rev = None
-    probe_minaln_score = 0
-    if probe_file:
-        print(f"Loading probe sequences from {probe_file} for orientation normalization...")
-        proberec = SeqIO.read(probe_file, "fasta")
-        probe_fwd = str(proberec.seq)
-        probe_rev = str(proberec.reverse_complement().seq)
-        probe_minaln_score = len(proberec.seq)
-        print("Probe sequences loaded. Sequences will be normalized to forward orientation.")
+    # Note: Orientation normalization now uses orientation info stored in UMI headers during extraction
+    # No need to load probe sequences here - orientation was determined during UMI extraction
     
     clus_N, cluster_sizes, labels = simplesim_cluster(umis, aln_thresh, max_clusters=max_clusters, clussize_thresh=clussize_thresh, clussize_window=clussize_window) 
 
@@ -658,6 +618,19 @@ def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, output_fol
     plt.savefig(output_folder + "_clustersizes_sequences.pdf", bbox_inches='tight')
     print("Clustersize distributions plotted")
 
+    # Build orientation map from UMI records (orientation stored in header during extraction)
+    print("Reading orientation information from UMI records...")
+    orientation_map = {}  # read_id -> 'forward' or 'reverse'
+    for umi_rec in umis:
+        # Parse orientation from header description if present
+        desc = umi_rec.description if hasattr(umi_rec, 'description') and umi_rec.description else ""
+        if 'orientation=' in desc:
+            orientation = desc.split('orientation=')[1].split()[0]
+            orientation_map[umi_rec.id] = orientation
+        else:
+            # Backward compatibility: if no orientation info, assume forward
+            orientation_map[umi_rec.id] = 'forward'
+    
     # Normalize sequences to forward orientation when writing cluster files
     print("Writing cluster files with orientation normalization...")
     count = 0
@@ -677,27 +650,29 @@ def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, output_fol
                         if len(clus_members_raw) == len(clus_member_ids):
                             break  # Found all members
             
-            # Normalize sequences to forward orientation if probe is provided
+            # Normalize sequences to forward orientation using stored orientation info
             clus_members = []
             for record in clus_members_raw:
-                if probe_file and probe_fwd and probe_rev:
-                    seq_str = str(record.seq)
-                    normalized_seq, was_rc = normalize_sequence_orientation(seq_str, probe_fwd, probe_rev, probe_minaln_score)
-                    if was_rc:
-                        normalized_count += 1
-                    # Create new record with normalized sequence
+                seq_str = str(record.seq)
+                # Get orientation from map (determined during UMI extraction)
+                orientation = orientation_map.get(record.id, 'forward')  # Default to forward for backward compatibility
+                
+                if orientation == 'reverse':
+                    # Reverse complement to forward orientation
+                    normalized_seq = str(Seq(seq_str).reverse_complement())
+                    normalized_count += 1
                     normalized_record = type(record)(Seq(normalized_seq), id=record.id, description=record.description)
                     clus_members.append(normalized_record)
                 else:
-                    # No normalization - use as-is
+                    # Already in forward orientation - use as-is
                     clus_members.append(record)
             
             fname = os.path.join(output_folder, f"cluster_{count}.fasta")
             SeqIO.write(clus_members, fname, "fasta")
     
-    if probe_file and normalized_count > 0:
+    if normalized_count > 0:
         print(f"Orientation normalization complete: {normalized_count} sequences reverse-complemented to forward orientation.")
-    elif probe_file:
+    else:
         print("Orientation normalization complete: all sequences were already in forward orientation.")
     print("Cluster files written")
 
@@ -755,17 +730,20 @@ def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size
     """Run CD-HIT clustering on UMI sequences."""
     print(f"Running CD-HIT clustering with {identity_threshold:.2f} identity threshold...", flush=True)
     
-    # Load probe sequences if provided for orientation normalization
-    probe_fwd = None
-    probe_rev = None
-    probe_minaln_score = 0
-    if probe_file:
-        print(f"Loading probe sequences from {probe_file} for orientation normalization...", flush=True)
-        proberec = SeqIO.read(probe_file, "fasta")
-        probe_fwd = str(proberec.seq)
-        probe_rev = str(proberec.reverse_complement().seq)
-        probe_minaln_score = len(proberec.seq)
-        print("Probe sequences loaded. Sequences will be normalized to forward orientation.", flush=True)
+    # Load orientation information from UMI file (stored during extraction)
+    print("Reading orientation information from UMI records...", flush=True)
+    orientation_map = {}  # read_id -> 'forward' or 'reverse'
+    with open_file_stream(input_umi_file) as file_handle:
+        for umi_rec in SeqIO.parse(file_handle, "fasta"):
+            # Parse orientation from header description if present
+            desc = umi_rec.description if hasattr(umi_rec, 'description') and umi_rec.description else ""
+            if 'orientation=' in desc:
+                orientation = desc.split('orientation=')[1].split()[0]
+                orientation_map[umi_rec.id] = orientation
+            else:
+                # Backward compatibility: if no orientation info, assume forward
+                orientation_map[umi_rec.id] = 'forward'
+    print(f"Loaded orientation info for {len(orientation_map)} sequences", flush=True)
     
     # Run CD-HIT
     cdhit_output = os.path.join(output_folder, "cdhit_output")
@@ -846,13 +824,14 @@ def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size
             for i, record in enumerate(parse_fastq_stream(file_handle)):
                 if record.id in read_to_cluster_file:
                     cluster_id, batch_idx = read_to_cluster_file[record.id]
-                    # Normalize sequence orientation if probe is provided
+                    # Normalize sequence orientation using stored orientation info (from UMI extraction)
                     seq_str = str(record.seq)
-                    if probe_file and probe_fwd and probe_rev:
-                        normalized_seq, was_rc = normalize_sequence_orientation(seq_str, probe_fwd, probe_rev, probe_minaln_score)
-                        if was_rc:
-                            normalized_count += 1
-                        seq_str = normalized_seq
+                    orientation = orientation_map.get(record.id, 'forward')  # Default to forward for backward compatibility
+                    
+                    if orientation == 'reverse':
+                        # Reverse complement to forward orientation
+                        seq_str = str(Seq(seq_str).reverse_complement())
+                        normalized_count += 1
                     # Write to batch file: cluster_id|seq_id|sequence
                     batch_files[batch_idx].write(f"{cluster_id}|{record.id}|{seq_str}\n")
                     total_found += 1
@@ -871,9 +850,9 @@ def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size
             f.close()
     
     print(f"✓ Single pass complete: found {total_found:,}/{total_needed:,} sequences", flush=True)
-    if probe_file and normalized_count > 0:
+    if normalized_count > 0:
         print(f"Orientation normalization: {normalized_count} sequences reverse-complemented to forward orientation.", flush=True)
-    elif probe_file:
+    else:
         print("Orientation normalization: all sequences were already in forward orientation.", flush=True)
     
     # Now split batch files into individual cluster files

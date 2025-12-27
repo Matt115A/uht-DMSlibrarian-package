@@ -775,7 +775,7 @@ Examples:
     cluster_parser = subparsers.add_parser('cluster', help='Cluster UMIs')
     cluster_parser.add_argument('--input_umi', required=True, help='Input UMI FASTA file')
     cluster_parser.add_argument('--input_reads', required=True, help='Input reads FASTQ file (can be .gz)')
-    cluster_parser.add_argument('--probe', help='Probe sequence file (fasta format). If provided, sequences will be normalized to forward orientation before consensus generation.')
+    cluster_parser.add_argument('--probe', help='Probe sequence file (fasta format). NOTE: Orientation is determined during UMI extraction and stored in UMI headers. This argument is deprecated but kept for backward compatibility.')
     cluster_parser.add_argument('--aln_thresh', type=float, default=0.47, help='Alignment threshold for slow method (default: 0.47)')
     cluster_parser.add_argument('--identity', type=float, default=0.90, help='Sequence identity for fast method (default: 0.90)')
     cluster_parser.add_argument('--size_thresh', type=int, default=10, help='Size threshold (default: 10)')
@@ -822,6 +822,12 @@ Examples:
     fitness_parser.add_argument('--output_pools', required=True, nargs='+', help='Output pool names (space-separated, paired with inputs)')
     fitness_parser.add_argument('--min_input', type=int, default=10, help='Minimum count threshold in input pools (default: 10)')
     fitness_parser.add_argument('--aa_filter', type=str, default=None, help='Filter mutability plot to specific mutant amino acid (e.g., S for serine, P for proline, * for stop codons)')
+    
+    # GUI command
+    gui_parser = subparsers.add_parser('gui', help='Launch interactive web-based GUI')
+    gui_parser.add_argument('--host', default='127.0.0.1', help='Server host (default: 127.0.0.1)')
+    gui_parser.add_argument('--port', type=int, default=7860, help='Server port (default: 7860)')
+    gui_parser.add_argument('--share', action='store_true', help='Create public share link')
     
     args = parser.parse_args()
     
@@ -870,6 +876,15 @@ Examples:
             args.min_input,
             args.aa_filter
         )
+    elif args.command == 'gui':
+        try:
+            from .gui import launch_gui
+            print("Launching GUI...")
+            launch_gui(server_name=args.host, server_port=args.port, share=args.share)
+            return 0
+        except ImportError:
+            print("ERROR: Gradio is not installed. Please install it with: pip install gradio")
+            return 1
     else:
         print(f"Unknown command: {args.command}")
         return 1

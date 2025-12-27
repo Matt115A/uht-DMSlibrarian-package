@@ -22,7 +22,7 @@ setup(
     author_email="mp957@cam.ac.uk",
     url="https://github.com/Matt115A/uht-DMSlibrarian-package",  
     packages=find_packages(),
-    python_requires="==3.10",
+    python_requires=">=3.10,<3.11",
     install_requires=[
         "biopython==1.86",
         "scikit-bio==0.7.0",
@@ -34,6 +34,7 @@ setup(
         "scikit-allel==1.3.13",
         "tqdm==4.67.1",
         "psutil==7.1.3",
+        "gradio>=4.0.0",
     ],
     entry_points={
         "console_scripts": [
