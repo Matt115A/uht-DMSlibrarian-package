@@ -58,6 +58,7 @@ fullclus_parser.add_argument('-o', '--output', help='Folder name for output file
 fullclus_parser.add_argument('--reads', help='Fastq file of basecalled reads.', required=True)
 fullclus_parser.add_argument('--aln_thresh', type=int, help='Alignment threshold for clustering. UMIs with alignment scores higher than aln_thresh will be clustered.', required=True)
 fullclus_parser.add_argument('--size_thresh', type=int, help='Minimal size a cluster can have to be written to file.', required=True)
+fullclus_parser.add_argument('--probe', help='Probe sequence file (fasta format). If provided, sequences will be normalized to forward orientation before consensus generation.', required=False)
 fullclus_parser.add_argument('--stop_thresh', type=int, default=5, required=False, help='Defaults to 5. Stops clustering if the average cluster size is smaller than this threshold. Essentially speeds up the clustering by dropping outliers. Set the threshold to 0 if you do not want the program to quit early!')
 fullclus_parser.add_argument('--stop_window', type=int, default=20, required=False, help='Defaults to 20. Sets the number of clusters to be used to calculate average cluster size.')
 
@@ -68,6 +69,7 @@ fastclus_parser.add_argument('-o', '--output', help='Folder name for output file
 fastclus_parser.add_argument('--reads', help='Fastq file of basecalled reads.', required=True)
 fastclus_parser.add_argument('--identity', type=float, default=0.90, help='Sequence identity threshold for clustering (0-1). Default: 0.90 (90%% identity)')
 fastclus_parser.add_argument('--size_thresh', type=int, help='Minimal size a cluster can have to be written to file.', required=True)
+fastclus_parser.add_argument('--probe', help='Probe sequence file (fasta format). If provided, sequences will be normalized to forward orientation before consensus generation.', required=False)
 
 # Module-level variables that will be set when run as main
 args = None
@@ -275,6 +277,39 @@ def align_sequence(query_seq, target_seq):
         target_begin=0,
         target_end_optimal=len(target_seq)
     )
+
+def normalize_sequence_orientation(sequence_str, probe_fwd, probe_rev, probe_minaln_score):
+    """
+    Determine sequence orientation and return normalized sequence (forward orientation).
+    
+    Args:
+        sequence_str: The sequence string to normalize
+        probe_fwd: Forward probe sequence
+        probe_rev: Reverse complement probe sequence
+        probe_minaln_score: Minimum alignment score threshold
+    
+    Returns:
+        tuple: (normalized_sequence_str, is_reverse_complemented)
+        - normalized_sequence_str: Sequence in forward orientation
+        - is_reverse_complemented: True if sequence was reverse-complemented, False otherwise
+    """
+    alnF = align_sequence_fast(probe_fwd, sequence_str)
+    alnR = align_sequence_fast(probe_rev, sequence_str)
+    scoreF = alnF.optimal_alignment_score
+    scoreR = alnR.optimal_alignment_score
+    
+    # Check if either alignment meets minimum score
+    if scoreF > probe_minaln_score or scoreR > probe_minaln_score:
+        if scoreF > scoreR:
+            # Forward orientation - return as-is
+            return sequence_str, False
+        else:
+            # Reverse orientation - reverse complement
+            return str(Seq(sequence_str).reverse_complement()), True
+    else:
+        # If neither alignment is strong enough, assume forward (conservative)
+        # This should be rare if probe sequences are correct
+        return sequence_str, False
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #UMI EXTRACTION
@@ -575,8 +610,21 @@ if __name__ == '__main__' and mode == 'clustertest':
 #FULL CLUSTERING
 
 ##Change max_clusters to eg 10 for testing, leave out/set to 0 for production
-def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, max_clusters=0, clussize_thresh=0, clussize_window=20):
+def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, output_folder, probe_file=None, max_clusters=0, clussize_thresh=0, clussize_window=20):
     print("Beginning clustering...")
+    
+    # Load probe sequences if provided for orientation normalization
+    probe_fwd = None
+    probe_rev = None
+    probe_minaln_score = 0
+    if probe_file:
+        print(f"Loading probe sequences from {probe_file} for orientation normalization...")
+        proberec = SeqIO.read(probe_file, "fasta")
+        probe_fwd = str(proberec.seq)
+        probe_rev = str(proberec.reverse_complement().seq)
+        probe_minaln_score = len(proberec.seq)
+        print("Probe sequences loaded. Sequences will be normalized to forward orientation.")
+    
     clus_N, cluster_sizes, labels = simplesim_cluster(umis, aln_thresh, max_clusters=max_clusters, clussize_thresh=clussize_thresh, clussize_window=clussize_window) 
 
     #Printing some metrics
@@ -610,7 +658,10 @@ def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, max_cluste
     plt.savefig(output_folder + "_clustersizes_sequences.pdf", bbox_inches='tight')
     print("Clustersize distributions plotted")
 
+    # Normalize sequences to forward orientation when writing cluster files
+    print("Writing cluster files with orientation normalization...")
     count = 0
+    normalized_count = 0
     for i in range(clus_N):
         if cluster_sizes[i] >= size_thresh:
             #Get reads according to UMI label using streaming
@@ -618,16 +669,36 @@ def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, max_cluste
             clus_member_ids = [rec.id for rec, lab in zip(umis, labels) if lab == i]
             
             # Stream through reads file to find matching sequences
-            clus_members = []
+            clus_members_raw = []
             with open_file_stream(reads_file_path) as file_handle:
                 for record in parse_fastq_stream(file_handle):
                     if record.id in clus_member_ids:
-                        clus_members.append(record)
-                        if len(clus_members) == len(clus_member_ids):
+                        clus_members_raw.append(record)
+                        if len(clus_members_raw) == len(clus_member_ids):
                             break  # Found all members
             
-            fname = output_folder + "/cluster_" + str(count) + ".fasta"
+            # Normalize sequences to forward orientation if probe is provided
+            clus_members = []
+            for record in clus_members_raw:
+                if probe_file and probe_fwd and probe_rev:
+                    seq_str = str(record.seq)
+                    normalized_seq, was_rc = normalize_sequence_orientation(seq_str, probe_fwd, probe_rev, probe_minaln_score)
+                    if was_rc:
+                        normalized_count += 1
+                    # Create new record with normalized sequence
+                    normalized_record = type(record)(Seq(normalized_seq), id=record.id, description=record.description)
+                    clus_members.append(normalized_record)
+                else:
+                    # No normalization - use as-is
+                    clus_members.append(record)
+            
+            fname = os.path.join(output_folder, f"cluster_{count}.fasta")
             SeqIO.write(clus_members, fname, "fasta")
+    
+    if probe_file and normalized_count > 0:
+        print(f"Orientation normalization complete: {normalized_count} sequences reverse-complemented to forward orientation.")
+    elif probe_file:
+        print("Orientation normalization complete: all sequences were already in forward orientation.")
     print("Cluster files written")
 
 
@@ -638,6 +709,7 @@ if __name__ == '__main__' and mode == 'clusterfull':
     aln_thresh = args.aln_thresh  #50
     size_thresh = args.size_thresh  #5  
     output_folder = args.output    #'./4_clustering/BC03_RS-clusters/'
+    probe_file = getattr(args, 'probe', None)  # Optional probe file for orientation normalization
     clussize_thresh = args.stop_thresh  #Defaults to 5. Set to 0 if you don't want it to stop clustering!
     clussize_window = args.stop_window  #defaults to 20. 
     
@@ -655,7 +727,7 @@ if __name__ == '__main__' and mode == 'clusterfull':
 
     #NOW ENDS EARLY IF CLUSSIZE_WINDOW AND THRESH ARE SET!
     #Calculates average clusterisze over the last X clusters and stops clustering if this is below thresh!
-    cluster_sequences(umis, input_READSfile, aln_thresh, size_thresh, clussize_thresh=clussize_thresh, clussize_window=clussize_window)
+    cluster_sequences(umis, input_READSfile, aln_thresh, size_thresh, output_folder, probe_file=probe_file, clussize_thresh=clussize_thresh, clussize_window=clussize_window)
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -679,9 +751,21 @@ def parse_cdhit_clusters(clstr_file):
     
     return clusters
 
-def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size_thresh, reads_file_path):
+def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size_thresh, reads_file_path, probe_file=None):
     """Run CD-HIT clustering on UMI sequences."""
     print(f"Running CD-HIT clustering with {identity_threshold:.2f} identity threshold...", flush=True)
+    
+    # Load probe sequences if provided for orientation normalization
+    probe_fwd = None
+    probe_rev = None
+    probe_minaln_score = 0
+    if probe_file:
+        print(f"Loading probe sequences from {probe_file} for orientation normalization...", flush=True)
+        proberec = SeqIO.read(probe_file, "fasta")
+        probe_fwd = str(proberec.seq)
+        probe_rev = str(proberec.reverse_complement().seq)
+        probe_minaln_score = len(proberec.seq)
+        print("Probe sequences loaded. Sequences will be normalized to forward orientation.", flush=True)
     
     # Run CD-HIT
     cdhit_output = os.path.join(output_folder, "cdhit_output")
@@ -757,12 +841,20 @@ def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size
     total_needed = len(read_to_cluster_file)
     
     try:
+        normalized_count = 0
         with open_file_stream(reads_file_path) as file_handle:
             for i, record in enumerate(parse_fastq_stream(file_handle)):
                 if record.id in read_to_cluster_file:
                     cluster_id, batch_idx = read_to_cluster_file[record.id]
+                    # Normalize sequence orientation if probe is provided
+                    seq_str = str(record.seq)
+                    if probe_file and probe_fwd and probe_rev:
+                        normalized_seq, was_rc = normalize_sequence_orientation(seq_str, probe_fwd, probe_rev, probe_minaln_score)
+                        if was_rc:
+                            normalized_count += 1
+                        seq_str = normalized_seq
                     # Write to batch file: cluster_id|seq_id|sequence
-                    batch_files[batch_idx].write(f"{cluster_id}|{record.id}|{str(record.seq)}\n")
+                    batch_files[batch_idx].write(f"{cluster_id}|{record.id}|{seq_str}\n")
                     total_found += 1
                     
                     if total_found % 50000 == 0:
@@ -779,6 +871,10 @@ def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size
             f.close()
     
     print(f"✓ Single pass complete: found {total_found:,}/{total_needed:,} sequences", flush=True)
+    if probe_file and normalized_count > 0:
+        print(f"Orientation normalization: {normalized_count} sequences reverse-complemented to forward orientation.", flush=True)
+    elif probe_file:
+        print("Orientation normalization: all sequences were already in forward orientation.", flush=True)
     
     # Now split batch files into individual cluster files
     print(f"Writing individual cluster files...", flush=True)
@@ -841,6 +937,7 @@ if __name__ == '__main__' and mode == 'clusterfull_fast':
     identity_thresh = args.identity
     size_thresh = args.size_thresh
     output_folder = args.output
+    probe_file = getattr(args, 'probe', None)  # Optional probe file for orientation normalization
     
     #Make output directory
     if not os.path.exists(output_folder):
@@ -850,7 +947,7 @@ if __name__ == '__main__' and mode == 'clusterfull_fast':
     print(f"Using streaming approach for reads file: {input_READSfile}")
     
     # Run CD-HIT clustering
-    success = run_cdhit_clustering(input_UMIfile, output_folder, identity_thresh, size_thresh, input_READSfile)
+    success = run_cdhit_clustering(input_UMIfile, output_folder, identity_thresh, size_thresh, input_READSfile, probe_file=probe_file)
     
     if success:
         print("✓ Fast clustering completed successfully!")

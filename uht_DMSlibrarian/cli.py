@@ -21,6 +21,8 @@ import argparse
 import subprocess
 import time
 from pathlib import Path
+from datetime import datetime
+from Bio import SeqIO
 
 # Import from package
 from . import simple_consensus_pipeline
@@ -74,6 +76,9 @@ def run_clustering(args):
     # Determine which clustering method to use
     use_fast = args.fast and not args.slow
     
+    # Get probe file if available (for orientation normalization)
+    probe_file = getattr(args, 'probe', None)
+    
     if use_fast:
         # Use fast CD-HIT clustering
         cmd = [
@@ -84,6 +89,9 @@ def run_clustering(args):
             "--identity", str(args.identity),
             "--size_thresh", str(args.size_thresh)
         ]
+        # Add probe if provided
+        if probe_file:
+            cmd.extend(["--probe", probe_file])
         description = "Fast UMI Clustering (CD-HIT)"
     else:
         # Use slow alignment-based clustering
@@ -96,6 +104,9 @@ def run_clustering(args):
             "--aln_thresh", str(aln_thresh_int),
             "--size_thresh", str(args.size_thresh)
         ]
+        # Add probe if provided
+        if probe_file:
+            cmd.extend(["--probe", probe_file])
         description = "Slow UMI Clustering (alignment-based)"
     
     return run_command(cmd, description)
@@ -352,8 +363,202 @@ def run_analysis(args):
     return vcf2csv_detailed.vcf_to_csv_detailed(args.input_vcf, args.reference, args.output)
 
 
+def count_fasta_sequences(fasta_file):
+    """Count sequences in a FASTA file."""
+    try:
+        count = 0
+        with open(fasta_file, 'r') as f:
+            for line in f:
+                if line.startswith('>'):
+                    count += 1
+        return count
+    except Exception:
+        return None
+
+
+def count_files_in_directory(directory, pattern_start="", pattern_end=""):
+    """Count files in a directory matching patterns."""
+    try:
+        count = 0
+        if os.path.exists(directory):
+            for file in os.listdir(directory):
+                if file.startswith(pattern_start) and file.endswith(pattern_end):
+                    count += 1
+        return count
+    except Exception:
+        return None
+
+
+def count_vcf_variants(vcf_file):
+    """Count variant lines in a VCF file (excluding header)."""
+    try:
+        count = 0
+        with open(vcf_file, 'r') as f:
+            for line in f:
+                if not line.startswith('#'):
+                    count += 1
+        return count
+    except Exception:
+        return None
+
+
+def get_file_size_mb(file_path):
+    """Get file size in MB."""
+    try:
+        if os.path.exists(file_path):
+            return os.path.getsize(file_path) / (1024 * 1024)
+        return None
+    except Exception:
+        return None
+
+
+def format_duration(seconds):
+    """Format duration in seconds to human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f} seconds"
+    elif seconds < 3600:
+        minutes = seconds / 60
+        return f"{minutes:.1f} minutes"
+    else:
+        hours = seconds / 3600
+        minutes = (seconds % 3600) / 60
+        if minutes < 1:
+            return f"{hours:.1f} hours"
+        else:
+            return f"{int(hours)} hours {int(minutes)} minutes"
+
+
+def write_pipeline_report(args, pipeline_stats, start_time, end_time, report_file):
+    """Write a comprehensive pipeline execution report."""
+    duration = end_time - start_time
+    duration_str = format_duration(duration)
+    
+    with open(report_file, 'w') as f:
+        f.write("=" * 80 + "\n")
+        f.write("UMIC-seq PACBIO PIPELINE EXECUTION REPORT\n")
+        f.write("=" * 80 + "\n\n")
+        
+        # Execution information
+        f.write("EXECUTION INFORMATION\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Start time: {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"End time: {datetime.fromtimestamp(end_time).strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Total duration: {duration_str}\n")
+        f.write(f"Status: {'SUCCESS' if pipeline_stats.get('success', False) else 'FAILED'}\n")
+        f.write("\n")
+        
+        # Input parameters
+        f.write("INPUT PARAMETERS\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Input FASTQ: {args.input}\n")
+        f.write(f"Probe file: {args.probe}\n")
+        f.write(f"Reference file: {args.reference}\n")
+        f.write(f"Output directory: {args.output_dir}\n")
+        f.write(f"UMI length: {args.umi_len}\n")
+        f.write(f"UMI location: {args.umi_loc}\n")
+        f.write(f"Min probe score: {getattr(args, 'min_probe_score', 15)}\n")
+        f.write(f"Clustering method: {'Fast (CD-HIT)' if getattr(args, 'fast', True) else 'Slow (alignment-based)'}\n")
+        if getattr(args, 'fast', True):
+            f.write(f"Identity threshold: {getattr(args, 'identity', 0.90)}\n")
+        else:
+            f.write(f"Alignment threshold: {getattr(args, 'aln_thresh', 0.47)}\n")
+        f.write(f"Size threshold: {args.size_thresh}\n")
+        f.write(f"Max reads per consensus: {args.max_reads}\n")
+        f.write(f"Max workers: {args.max_workers}\n")
+        f.write("\n")
+        
+        # Pipeline statistics
+        f.write("PIPELINE STATISTICS\n")
+        f.write("-" * 80 + "\n")
+        
+        # Step 1: UMI Extraction
+        f.write("\n1. UMI EXTRACTION\n")
+        umi_count = pipeline_stats.get('umis_extracted')
+        if umi_count is not None:
+            f.write(f"   UMIs extracted: {umi_count:,}\n")
+        else:
+            f.write("   UMIs extracted: N/A\n")
+        umi_file_size = pipeline_stats.get('umi_file_size_mb')
+        if umi_file_size is not None:
+            f.write(f"   UMI file size: {umi_file_size:.2f} MB\n")
+        
+        # Step 2: Clustering
+        f.write("\n2. CLUSTERING\n")
+        cluster_count = pipeline_stats.get('clusters_generated')
+        if cluster_count is not None:
+            f.write(f"   Clusters generated: {cluster_count:,}\n")
+        else:
+            f.write("   Clusters generated: N/A\n")
+        clustering_time = pipeline_stats.get('clustering_time')
+        if clustering_time is not None:
+            f.write(f"   Clustering duration: {format_duration(clustering_time)}\n")
+        
+        # Step 3: Consensus Generation
+        f.write("\n3. CONSENSUS GENERATION\n")
+        consensus_count = pipeline_stats.get('consensus_sequences')
+        if consensus_count is not None:
+            f.write(f"   Consensus sequences: {consensus_count:,}\n")
+        else:
+            f.write("   Consensus sequences: N/A\n")
+        consensus_success = pipeline_stats.get('consensus_success')
+        consensus_failed = pipeline_stats.get('consensus_failed')
+        if consensus_success is not None:
+            f.write(f"   Successful: {consensus_success:,}\n")
+        if consensus_failed is not None:
+            f.write(f"   Failed: {consensus_failed:,}\n")
+        consensus_time = pipeline_stats.get('consensus_time')
+        if consensus_time is not None:
+            f.write(f"   Consensus generation duration: {format_duration(consensus_time)}\n")
+        
+        # Step 4: Variant Calling
+        f.write("\n4. VARIANT CALLING\n")
+        variant_count = pipeline_stats.get('variants_called')
+        if variant_count is not None:
+            f.write(f"   Total variants: {variant_count:,}\n")
+        else:
+            f.write("   Total variants: N/A\n")
+        variant_success = pipeline_stats.get('variant_success')
+        variant_failed = pipeline_stats.get('variant_failed')
+        if variant_success is not None:
+            f.write(f"   Successful: {variant_success:,}\n")
+        if variant_failed is not None:
+            f.write(f"   Failed: {variant_failed:,}\n")
+        variant_time = pipeline_stats.get('variant_time')
+        if variant_time is not None:
+            f.write(f"   Variant calling duration: {format_duration(variant_time)}\n")
+        
+        # Step 5: Analysis
+        f.write("\n5. ANALYSIS\n")
+        analysis_file_size = pipeline_stats.get('analysis_file_size_mb')
+        if analysis_file_size is not None:
+            f.write(f"   Analysis file size: {analysis_file_size:.2f} MB\n")
+        else:
+            f.write("   Analysis file: Generated\n")
+        
+        # Output files
+        f.write("\nOUTPUT FILES\n")
+        f.write("-" * 80 + "\n")
+        output_files = pipeline_stats.get('output_files', {})
+        for file_desc, file_path in output_files.items():
+            if file_path and os.path.exists(file_path):
+                size_mb = get_file_size_mb(file_path)
+                if size_mb is not None:
+                    f.write(f"{file_desc}: {file_path} ({size_mb:.2f} MB)\n")
+                else:
+                    f.write(f"{file_desc}: {file_path}\n")
+            elif file_path:
+                f.write(f"{file_desc}: {file_path} (not found)\n")
+        
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("Report generated by uht-DMSlibrarian\n")
+        f.write("=" * 80 + "\n")
+
+
 def run_full_pipeline(args):
     """Run the complete pipeline."""
+    start_time = time.time()
+    pipeline_stats = {'success': False}
+    
     print(f"\n{'='*80}")
     print("STARTING COMPLETE UMIC-seq PACBIO PIPELINE")
     print(f"{'='*80}")
@@ -372,6 +577,7 @@ def run_full_pipeline(args):
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Step 1: UMI Extraction
+    step_start = time.time()
     umi_file = os.path.join(args.output_dir, "ExtractedUMIs.fasta")
     extract_args = argparse.Namespace(
         input=args.input,
@@ -384,9 +590,18 @@ def run_full_pipeline(args):
     
     if not run_umi_extraction(extract_args):
         print("Pipeline failed at UMI extraction step")
+        end_time = time.time()
+        pipeline_stats['success'] = False
+        if getattr(args, 'report', None):
+            write_pipeline_report(args, pipeline_stats, start_time, end_time, args.report)
         return False
     
+    # Collect UMI extraction statistics
+    pipeline_stats['umis_extracted'] = count_fasta_sequences(umi_file)
+    pipeline_stats['umi_file_size_mb'] = get_file_size_mb(umi_file)
+    
     # Step 2: Clustering
+    clustering_start = time.time()
     cluster_dir = os.path.join(args.output_dir, "clusters")
     cluster_args = argparse.Namespace(
         input_umi=umi_file,
@@ -395,15 +610,25 @@ def run_full_pipeline(args):
         identity=getattr(args, 'identity', 0.90),
         size_thresh=args.size_thresh,
         output_dir=cluster_dir,
+        probe=args.probe,  # Pass probe file for orientation normalization
         fast=getattr(args, 'fast', True),
         slow=getattr(args, 'slow', False)
     )
     
     if not run_clustering(cluster_args):
         print("Pipeline failed at clustering step")
+        end_time = time.time()
+        pipeline_stats['success'] = False
+        if getattr(args, 'report', None):
+            write_pipeline_report(args, pipeline_stats, start_time, end_time, args.report)
         return False
     
+    # Collect clustering statistics
+    pipeline_stats['clustering_time'] = time.time() - clustering_start
+    pipeline_stats['clusters_generated'] = count_files_in_directory(cluster_dir, "cluster_", ".fasta")
+    
     # Step 3: Consensus Generation
+    consensus_start = time.time()
     consensus_dir = os.path.join(args.output_dir, "consensus")
     consensus_args = argparse.Namespace(
         input_dir=cluster_dir,
@@ -414,9 +639,18 @@ def run_full_pipeline(args):
     
     if not run_consensus_generation(consensus_args):
         print("Pipeline failed at consensus generation step")
+        end_time = time.time()
+        pipeline_stats['success'] = False
+        if getattr(args, 'report', None):
+            write_pipeline_report(args, pipeline_stats, start_time, end_time, args.report)
         return False
     
+    # Collect consensus statistics
+    pipeline_stats['consensus_time'] = time.time() - consensus_start
+    pipeline_stats['consensus_sequences'] = count_files_in_directory(consensus_dir, "", "_consensus.fasta")
+    
     # Step 4: Variant Calling
+    variant_start = time.time()
     variant_dir = os.path.join(args.output_dir, "variants")
     combined_vcf = os.path.join(args.output_dir, "combined_variants.vcf")
     variant_args = argparse.Namespace(
@@ -429,7 +663,15 @@ def run_full_pipeline(args):
     
     if not run_variant_calling(variant_args):
         print("Pipeline failed at variant calling step")
+        end_time = time.time()
+        pipeline_stats['success'] = False
+        if getattr(args, 'report', None):
+            write_pipeline_report(args, pipeline_stats, start_time, end_time, args.report)
         return False
+    
+    # Collect variant calling statistics
+    pipeline_stats['variant_time'] = time.time() - variant_start
+    pipeline_stats['variants_called'] = count_vcf_variants(combined_vcf) if os.path.exists(combined_vcf) else None
     
     # Step 5: Detailed Analysis
     analysis_file = os.path.join(args.output_dir, "detailed_mutations.csv")
@@ -441,7 +683,28 @@ def run_full_pipeline(args):
     
     if not run_analysis(analysis_args):
         print("Pipeline failed at analysis step")
+        end_time = time.time()
+        pipeline_stats['success'] = False
+        if getattr(args, 'report', None):
+            write_pipeline_report(args, pipeline_stats, start_time, end_time, args.report)
         return False
+    
+    # Collect analysis statistics
+    pipeline_stats['analysis_file_size_mb'] = get_file_size_mb(analysis_file)
+    
+    # Pipeline completed successfully
+    end_time = time.time()
+    pipeline_stats['success'] = True
+    
+    # Store output file paths
+    pipeline_stats['output_files'] = {
+        'UMI file': umi_file,
+        'Cluster directory': cluster_dir,
+        'Consensus directory': consensus_dir,
+        'Variant directory': variant_dir,
+        'Combined VCF': combined_vcf,
+        'Analysis file': analysis_file
+    }
     
     print(f"\n{'='*80}")
     print("PIPELINE COMPLETED SUCCESSFULLY!")
@@ -452,6 +715,12 @@ def run_full_pipeline(args):
     print(f"Variant directory: {variant_dir}")
     print(f"Combined VCF: {combined_vcf}")
     print(f"{'='*80}")
+    
+    # Generate report if requested
+    if getattr(args, 'report', None):
+        print(f"\nGenerating pipeline report: {args.report}")
+        write_pipeline_report(args, pipeline_stats, start_time, end_time, args.report)
+        print(f"Report saved to: {args.report}")
     
     return True
 
@@ -492,6 +761,7 @@ Examples:
     all_parser.add_argument('--slow', action='store_true', help='Use slow alignment-based clustering')
     all_parser.add_argument('--umi_loc', type=str, default='up', choices=['up', 'down'], help='UMI location relative to probe (up or down, default: up)')
     all_parser.add_argument('--min_probe_score', type=int, default=15, help='Minimal alignment score of probe for processing (default: 15)')
+    all_parser.add_argument('--report', help='Path to output report file. Generates a summary report with execution time, parameters, and statistics.')
     
     # Individual step commands
     extract_parser = subparsers.add_parser('extract', help='Extract UMIs from raw reads')
@@ -505,6 +775,7 @@ Examples:
     cluster_parser = subparsers.add_parser('cluster', help='Cluster UMIs')
     cluster_parser.add_argument('--input_umi', required=True, help='Input UMI FASTA file')
     cluster_parser.add_argument('--input_reads', required=True, help='Input reads FASTQ file (can be .gz)')
+    cluster_parser.add_argument('--probe', help='Probe sequence file (fasta format). If provided, sequences will be normalized to forward orientation before consensus generation.')
     cluster_parser.add_argument('--aln_thresh', type=float, default=0.47, help='Alignment threshold for slow method (default: 0.47)')
     cluster_parser.add_argument('--identity', type=float, default=0.90, help='Sequence identity for fast method (default: 0.90)')
     cluster_parser.add_argument('--size_thresh', type=int, default=10, help='Size threshold (default: 10)')

@@ -17,7 +17,8 @@ umic-seq-pacbio all \
   --identity 0.95 \
   --size_thresh 15 \
   --max_reads 30 \
-  --max_workers 8
+  --max_workers 8 \
+  --report pipeline_report.txt
 ```
 
 **External dependancies:**
@@ -44,6 +45,7 @@ Please install both of these and ensure they are in the PATH of your environment
 - `--slow`: Use slow alignment-based clustering (alternative to --fast, legacy)
 - `--identity` (default: 0.90): Sequence identity threshold for fast clustering (0-1). 0.90 = 90% identity = allows up to 10% mismatch. For a 52bp UMI, this allows ~5 mismatches.
 - `--aln_thresh` (default: 0.47): Alignment score threshold for slow clustering (only used with --slow). Converts to integer score: 0.47 → 47. For a 52bp UMI with perfect match ≈ 104, threshold 47 ≈ 45% of perfect. **Note**: This is legacy and will be removed in future versions.
+- **Orientation normalization**: When `--probe` is provided during clustering, sequences are automatically normalized to forward orientation based on probe alignment before being written to cluster files. This ensures all sequences in a cluster have the same orientation, improving consensus quality. If `--probe` is not provided, sequences are written as-is (backward compatible).
 
 **Cluster Filtering:**
 - `--size_thresh` (default: 10): Minimum number of long reads required per cluster. Clusters with fewer reads are discarded. Lower values = more sensitive (detects rare variants), higher values = more conservative (only high-confidence variants).
@@ -54,14 +56,17 @@ Please install both of these and ensure they are in the PATH of your environment
 **Performance:**
 - `--max_workers` (default: 4): Number of parallel workers for consensus generation and variant calling. Increase for faster processing if you have more CPU cores available.
 
+**Reporting:**
+- `--report` (optional): Path to output report file. If provided, generates a comprehensive summary report including execution time, input parameters, pipeline statistics (UMIs extracted, clusters generated, consensus sequences, variants called), and output file locations.
+
 
 ### Pipeline Steps
 
 The `all` command runs the complete pipeline:
 
-1. **UMI Extraction**: Extract UMIs from long reads
-2. **Clustering**: Cluster similar UMIs using ultra-fast hash-based algorithm
-3. **Consensus Generation**: Generate consensus sequences using abpoa
+1. **UMI Extraction**: Extract UMIs from long reads using probe alignment
+2. **Clustering**: Cluster similar UMIs using ultra-fast hash-based algorithm. Sequences are normalized to forward orientation (based on probe alignment) to ensure consistent orientation within clusters.
+3. **Consensus Generation**: Generate consensus sequences using abpoa from consistently oriented sequences
 4. **Variant Calling**: Call variants using minimap2 and bcftools
 5. **Analysis**: Generate detailed CSV with mutation analysis
 
@@ -84,7 +89,8 @@ umic-seq-pacbio cluster \
   --input_umi ExtractedUMIs.fasta \
   --input_reads reads.fastq.gz \
   --output_dir UMIclusterfull_fast \
-  --aln_thresh 0.47 \
+  --probe probe.fasta \
+  --identity 0.90 \
   --size_thresh 10
 
 # Generate consensus sequences
@@ -236,6 +242,7 @@ umic-seq-pacbio fitness \
 
 The pipeline generates:
 - `ExtractedUMIs.fasta`: Extracted UMI sequences
+- `pipeline_report.txt`: Execution report (if `--report` specified) containing summary statistics, execution time, and parameters used
 - `UMIclusterfull_fast/`: Cluster files (cluster_1.fasta, cluster_2.fasta, ...)
 - `consensus_results/`: Consensus sequences per cluster
 - `variant_results/`: Individual VCF files per cluster
