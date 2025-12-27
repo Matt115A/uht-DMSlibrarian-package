@@ -113,6 +113,7 @@ umic-seq-pacbio analyze \
   --input_vcf combined_variants.vcf \
   --reference reference.fasta \
   --output final_results.csv
+```
 
 ### NGS Pool Counting (Illumina) with UMI matching and haplotypes
 
@@ -233,8 +234,8 @@ umic-seq-pacbio fitness \
 ### Threshold Selection Guide
 
 **Quick reference:**
-- **High-quality data**: Use `--min_probe_score 30-40`, `--identity 0.90-0.95`, `--size_thresh 10-20`
-- **Lower-quality data**: Use `--min_probe_score 15-20`, `--identity 0.85-0.90`, `--size_thresh 5-10`
+- **High-quality data**: For a 50 bp probe, use `--min_probe_score 30-40`
+- **Q30+ data**: Use `--identity 0.85-0.90`
 - **Rare variant detection**: Lower `--size_thresh` (e.g., 3)
 - **High-confidence only**: Higher `--size_thresh` (e.g., 20)
 

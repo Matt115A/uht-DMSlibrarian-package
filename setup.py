@@ -10,7 +10,7 @@ readme_file = Path(__file__).parent / "README.md"
 long_description = readme_file.read_text() if readme_file.exists() else ""
 
 # Version
-__version__ = "0.1.0"
+__version__ = "0.1.4"
 
 setup(
     name="uht-dmslibrarian",
@@ -20,9 +20,9 @@ setup(
     long_description_content_type="text/markdown",
     author="Matt Penner",
     author_email="mp957@cam.ac.uk",
-    url="https://github.com/Matt115A/uht-DMSlibrarian-package",  # Update with actual URL if available
+    url="https://github.com/Matt115A/uht-DMSlibrarian-package",  
     packages=find_packages(),
-    python_requires=">=3.7",
+    python_requires="==3.10",
     install_requires=[
         "biopython==1.86",
         "scikit-bio==0.7.0",
@@ -45,12 +45,7 @@ setup(
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
         "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
     ],
     keywords="bioinformatics pacbio umi sequencing variant calling",
 )
