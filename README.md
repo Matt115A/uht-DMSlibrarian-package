@@ -21,7 +21,7 @@ umic-seq-pacbio gui --share  # Create a public share link (temporary)
 
 ## Complete Pipeline
 
-For dictinary generation from long reads, use the complete pipeline entry-point that handles the entire workflow from UMI extraction to final variant analysis:
+For dictionary generation from long reads, use the complete pipeline entry-point that handles the entire workflow from UMI extraction to final variant analysis:
 
 **Example with custom parameters:**
 ```bash
@@ -40,8 +40,8 @@ umic-seq-pacbio all \
   --report pipeline_report.txt
 ```
 
-**External dependancies:**
-- `CD-HIT'
+**External dependencies:**
+- `CD-HIT`
 - `Abpoa`
 
 Please install both of these and ensure they are in the PATH of your environment. Use e.g. conda to install these. 
@@ -49,7 +49,7 @@ Please install both of these and ensure they are in the PATH of your environment
 **Required Arguments:**
 - `--input`: Input FASTQ file (can be .gz compressed)
 - `--probe`: Probe FASTA file containing an approximately 50 bp sequence adjacent to the UMI
-- `--reference`: Reference FASTA file containing the reference gene sequence
+- `--reference`: Reference FASTA file containing 1-6 reference gene sequences. For multi-gene experiments, include multiple sequences in a single FASTA; the pipeline will automatically match each consensus to its best-matching reference.
 - `--output_dir`: Output directory where all results will be written
 
 **Optional Arguments (with defaults):**
@@ -88,6 +88,34 @@ The `all` command runs the complete pipeline:
 3. **Consensus Generation**: Generate consensus sequences using abpoa from consistently oriented sequences
 4. **Variant Calling**: Call variants using minimap2 and bcftools
 5. **Analysis**: Generate detailed CSV with mutation analysis
+
+### Multi-Reference Support
+
+The pipeline supports experiments with multiple gene variants (1-6 reference sequences) in a single analysis run. This is useful for:
+- Multi-gene DMS experiments targeting several homologs
+- Experiments with multiple protein domains
+- Libraries containing distinct sequence variants
+
+**How it works:**
+1. Include multiple reference sequences in a single FASTA file (maximum 6 sequences)
+2. During variant calling, each consensus sequence is aligned against all references using minimap2
+3. The best-matching reference is automatically assigned to each consensus
+4. Reference IDs are propagated through all downstream outputs
+
+**Reference FASTA format:**
+```
+>gene_A
+ATGCGATCGATCG...
+>gene_B
+ATGCGATCGATCG...
+```
+
+**Output integration:**
+- `detailed_mutations.csv`: Contains `reference_id` column indicating which reference was used for each consensus
+- `pool_haplotype_counts.csv`: Contains `REFERENCE_ID` column for each haplotype
+- `merged_on_nonsyn_counts.csv`: Groups by (REFERENCE_ID, AA_MUTATIONS) to keep genes separate
+
+For single-reference experiments, the pipeline works as before with no changes required.
 
 ### Individual Commands
 
@@ -174,9 +202,11 @@ Inputs:
 Outputs:
 - `pool_variant_counts.csv`: wide table, rows = VCF entries (CHROM, POS, REF, ALT), columns = pools
 - `pool_haplotype_counts.csv`: rows = consensus haplotypes (cluster), columns = pools
-  - Columns: `CONSENSUS`, `MUTATIONS` (nucleotide, position-sorted), `AA_MUTATIONS` (non-synonymous only, grouped by codon)
+  - Columns: `CONSENSUS`, `REFERENCE_ID`, `MUTATIONS` (nucleotide, position-sorted), `AA_MUTATIONS` (non-synonymous only, grouped by codon), plus per-pool count columns
   - Example AA format: `S45F+Y76P`; wild type is `WT`
-- `merged_on_nonsyn_counts.csv`: haplotype counts merged by identical non-synonymous amino acid patterns; includes the contributing consensus IDs, distinct nucleotide mutation strings, and per-pool totals
+- `merged_on_nonsyn_counts.csv`: haplotype counts merged by identical (REFERENCE_ID, AA_MUTATIONS) patterns
+  - Columns: `REFERENCE_ID`, `AA_MUTATIONS`, `CONSENSUS_IDS`, `NUC_MUTATIONS`, plus per-pool count columns
+  - Keeps genes separate when using multi-reference mode
 
 Notes:
 - For Illumina reads, UMIs are taken from the internal region of merged reads (default first 22 and last 24 bases ignored, change this for your UMIs).
@@ -212,6 +242,7 @@ umic-seq-pacbio fitness \
 - `--output_pools`: Space-separated list of output pool names, paired with inputs (e.g., `pool3 pool4`)
 - `--min_input` (default: 10): Minimum count threshold in input pools; variants below this in any input are filtered out
 - `--aa_filter` (optional): Filter mutability plot to specific mutant amino acid (e.g., `S` for serine, `P` for proline, `*` for stop codons)
+- `--group_by_reference` (optional): Generate separate plots and analysis per reference template. Requires `REFERENCE_ID` column in input (created automatically when using multi-reference mode)
 
 **Outputs:**
 - `fitness_analysis_results.csv`: Processed data with fitness calculations, relative frequencies, mutation annotations, and bootstrap confidence intervals (if multiple replicates)
@@ -231,6 +262,7 @@ umic-seq-pacbio fitness \
   - Amino acids arranged by similarity (hydrophobic, polar, charged, etc.)
   - Red = beneficial, Blue = deleterious
 - `substitution_matrix.csv`: Full substitution matrix data for further analysis
+- `ref_*/` (with `--group_by_reference`): Per-reference subdirectories containing reference-specific plots and `fitness_analysis_{ref_id}.csv`
 
 **Example with multiple input/output pairs:**
 ```bash
@@ -249,6 +281,7 @@ umic-seq-pacbio fitness \
 - Epistasis analysis requires both single and double mutants to be present in the dataset
 - Mutability plots show average fitness aggregated across all single mutants at each position, relative to WT
 - Reproducibility plot requires at least 2 replicate pairs
+- When using `--group_by_reference`, all plots are generated twice: once for the combined dataset and once per reference template in subdirectories
 
 ### Threshold Selection Guide
 
@@ -267,12 +300,13 @@ The pipeline generates:
 - `consensus_results/`: Consensus sequences per cluster
 - `variant_results/`: Individual VCF files per cluster
 - `combined_variants.vcf`: Combined variant calls
-- `final_results.csv`: Detailed analysis with amino acid mutations, Hamming distance, stop codons, and indels
+- `detailed_mutations.csv`: Detailed analysis with columns: `name`, `reference_id`, `consensus_sequence`, `mutations`, `hamming_distance`, `premature_stop`, `indelsyn`
 - `pool_variant_counts.csv`: wide table, rows = VCF entries (CHROM, POS, REF, ALT), columns = pools
 - `pool_haplotype_counts.csv`: rows = consensus haplotypes (cluster), columns = pools
-  - Columns: `CONSENSUS`, `MUTATIONS` (nucleotide, position-sorted), `AA_MUTATIONS` (non-synonymous only, grouped by codon)
+  - Columns: `CONSENSUS`, `REFERENCE_ID`, `MUTATIONS` (nucleotide, position-sorted), `AA_MUTATIONS` (non-synonymous only, grouped by codon), plus per-pool count columns
   - Example AA format: `S45F+Y76P`; wild type is `WT`
-- `merged_on_nonsyn_counts.csv`: haplotype counts merged by identical non-synonymous amino acid patterns; includes the contributing consensus IDs, distinct nucleotide mutation strings, and per-pool totals
+- `merged_on_nonsyn_counts.csv`: haplotype counts merged by identical (REFERENCE_ID, AA_MUTATIONS) patterns
+  - Columns: `REFERENCE_ID`, `AA_MUTATIONS`, `CONSENSUS_IDS`, `NUC_MUTATIONS`, plus per-pool count columns
 - `fitness_analysis_results.csv`: Processed fitness data with log ratios, annotations, and bootstrap CIs (from fitness analysis step)
 - `mutability_plot.png`: Average fitness by position for single mutants (from fitness analysis step)
 - `epistasis_plot.png`: Epistasis analysis plot (from fitness analysis step)

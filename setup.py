@@ -10,7 +10,7 @@ readme_file = Path(__file__).parent / "README.md"
 long_description = readme_file.read_text() if readme_file.exists() else ""
 
 # Version
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 setup(
     name="uht-dmslibrarian",
@@ -45,7 +45,6 @@ setup(
         "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
-        "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3.10",
     ],
     keywords="bioinformatics pacbio umi sequencing variant calling",

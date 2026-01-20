@@ -30,6 +30,9 @@ test_*
 *_test*
 *_temp*
 
+# Agent files
+CLAUDE.md
+
 # Output directories
 UMIclusterfull_*
 consensus_results/

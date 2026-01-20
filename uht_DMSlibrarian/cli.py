@@ -30,6 +30,7 @@ from . import sensitive_variant_pipeline
 from . import vcf2csv_detailed
 from . import ngs_count
 from . import fitness_analysis
+from .reference_manager import ReferenceManager
 
 
 def run_command(cmd, description="", check=True):
@@ -226,61 +227,76 @@ def run_consensus_generation(args):
     return success_count > 0
 
 
-def run_variant_calling(args):
-    """Run variant calling step."""
+def run_variant_calling(args, ref_manager=None):
+    """
+    Run variant calling step.
+
+    Args:
+        args: Namespace with input_dir, reference, output_dir, combined_vcf, max_workers
+        ref_manager: Optional ReferenceManager instance for multi-reference mode.
+                     If None, uses args.reference as single reference file.
+    """
     consensus_dir = args.input_dir
     reference_file = args.reference
     output_dir = args.output_dir
     combined_vcf = args.combined_vcf
     max_workers = args.max_workers
-    
+
     print(f"\n{'='*60}")
     print(f"RUNNING: Variant Calling")
     print(f"{'='*60}")
-    
+
     start_time = time.time()
-    
+
     print(f"Starting SENSITIVE variant calling pipeline...")
     print(f"This will call ALL variants, including single mismatches!")
     print(f"Consensus directory: {consensus_dir}")
-    print(f"Reference file: {reference_file}")
+
+    # Use ReferenceManager if provided, otherwise use file path
+    if ref_manager is not None:
+        print(ref_manager.get_reference_info())
+        reference_for_calling = ref_manager
+    else:
+        print(f"Reference file: {reference_file}")
+        reference_for_calling = reference_file
+
     print(f"Output directory: {output_dir}")
     print(f"Combined VCF: {combined_vcf}")
-    
+
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Get list of consensus files
     consensus_files = []
     for file in os.listdir(consensus_dir):
         if file.endswith('_consensus.fasta'):
             consensus_files.append(os.path.join(consensus_dir, file))
-    
+
     total_consensus = len(consensus_files)
     print(f"Found {total_consensus:,} consensus files to process\n")
-    
+
     # Track progress
     success_count = 0
     failed_count = 0
-    
+
     # Thread-safe progress tracking
     import threading
     progress_lock = threading.Lock()
-    
+
     def update_progress():
         nonlocal success_count, failed_count
         with progress_lock:
             processed = success_count + failed_count
             elapsed_time = time.time() - start_time
             rate = processed / elapsed_time if elapsed_time > 0 else 0
-            
+
             # Calculate ETA
             if rate > 0:
                 remaining = total_consensus - processed
                 eta_seconds = remaining / rate
                 eta_minutes = eta_seconds / 60
                 eta_hours = eta_minutes / 60
-                
+
                 if eta_hours >= 1:
                     eta_str = f"{eta_hours:.1f}h"
                 elif eta_minutes >= 1:
@@ -289,7 +305,7 @@ def run_variant_calling(args):
                     eta_str = f"{eta_seconds:.0f}s"
             else:
                 eta_str = "unknown"
-            
+
             # Format elapsed time
             if elapsed_time >= 3600:
                 elapsed_str = f"{elapsed_time/3600:.1f}h"
@@ -297,34 +313,34 @@ def run_variant_calling(args):
                 elapsed_str = f"{elapsed_time/60:.1f}m"
             else:
                 elapsed_str = f"{elapsed_time:.0f}s"
-            
+
             # Progress bar
             progress_percent = (processed / total_consensus) * 100
             bar_length = 50
             filled_length = int(bar_length * processed // total_consensus)
             bar = '█' * filled_length + '-' * (bar_length - filled_length)
-            
+
             # Print progress line
             progress_line = (f"\rProgress: |{bar}| {progress_percent:.1f}% "
                            f"({processed:,}/{total_consensus:,}) | "
                            f"Success: {success_count:,} | Failed: {failed_count:,} | "
                            f"Rate: {rate:.1f} consensus/s | ETA: {eta_str} | "
                            f"Elapsed: {elapsed_str}")
-            
+
             print(progress_line, end='', flush=True)
-    
+
     # Process consensus files in parallel with batched submission
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(sensitive_variant_pipeline.process_consensus_file_sensitive, 
-                                  cf, reference_file, output_dir): cf 
+        futures = {executor.submit(sensitive_variant_pipeline.process_consensus_file_sensitive,
+                                  cf, reference_for_calling, output_dir): cf
                   for cf in consensus_files}
-        
+
         # Process as they complete
         for future in as_completed(futures):
             result = future.result()
-            
+
             with progress_lock:
                 if "SUCCESS" in result:
                     success_count += 1
@@ -332,13 +348,13 @@ def run_variant_calling(args):
                     failed_count += 1
                     if failed_count <= 10:  # Only show first 10 failures
                         print(f"\nFailed: {result}")
-            
+
             update_progress()
-    
+
     # Combine VCF files
     print(f"\n\nCombining VCF files...")
     combine_success = sensitive_variant_pipeline.combine_vcf_files(output_dir, combined_vcf)
-    
+
     # Final summary
     total_time = time.time() - start_time
     print(f"\nSensitive variant calling pipeline completed!")
@@ -352,15 +368,23 @@ def run_variant_calling(args):
         print(f"Combined VCF: {combined_vcf}")
     else:
         print("Failed to create combined VCF")
-    
+
     print(f"\n✓ COMPLETED: Variant Calling ({total_time:.1f}s)")
-    
+
     return success_count > 0
 
 
-def run_analysis(args):
-    """Run detailed analysis step."""
-    return vcf2csv_detailed.vcf_to_csv_detailed(args.input_vcf, args.reference, args.output)
+def run_analysis(args, ref_manager=None):
+    """
+    Run detailed analysis step.
+
+    Args:
+        args: Namespace with input_vcf, reference, output
+        ref_manager: Optional ReferenceManager instance for multi-reference mode.
+                     If None, uses args.reference as single reference file.
+    """
+    reference_for_analysis = ref_manager if ref_manager is not None else args.reference
+    return vcf2csv_detailed.vcf_to_csv_detailed(args.input_vcf, reference_for_analysis, args.output)
 
 
 def count_fasta_sequences(fasta_file):
@@ -558,7 +582,7 @@ def run_full_pipeline(args):
     """Run the complete pipeline."""
     start_time = time.time()
     pipeline_stats = {'success': False}
-    
+
     print(f"\n{'='*80}")
     print("STARTING COMPLETE UMIC-seq PACBIO PIPELINE")
     print(f"{'='*80}")
@@ -572,9 +596,17 @@ def run_full_pipeline(args):
     print(f"Max reads per consensus: {args.max_reads}")
     print(f"Max workers: {args.max_workers}")
     print(f"{'='*80}")
-    
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Load ReferenceManager for multi-reference support
+    print("\nLoading reference sequence(s)...")
+    ref_manager = ReferenceManager(args.reference)
+    print(ref_manager.get_reference_info())
+    if ref_manager.is_multi_reference():
+        print("Multi-reference mode enabled: consensus sequences will be matched to best reference")
+    print()
     
     # Step 1: UMI Extraction
     step_start = time.time()
@@ -660,8 +692,9 @@ def run_full_pipeline(args):
         combined_vcf=combined_vcf,
         max_workers=args.max_workers
     )
-    
-    if not run_variant_calling(variant_args):
+
+    # Pass ReferenceManager for multi-reference support
+    if not run_variant_calling(variant_args, ref_manager=ref_manager):
         print("Pipeline failed at variant calling step")
         end_time = time.time()
         pipeline_stats['success'] = False
@@ -680,8 +713,9 @@ def run_full_pipeline(args):
         reference=args.reference,
         output=analysis_file
     )
-    
-    if not run_analysis(analysis_args):
+
+    # Pass ReferenceManager for multi-reference support
+    if not run_analysis(analysis_args, ref_manager=ref_manager):
         print("Pipeline failed at analysis step")
         end_time = time.time()
         pipeline_stats['success'] = False
@@ -822,6 +856,7 @@ Examples:
     fitness_parser.add_argument('--output_pools', required=True, nargs='+', help='Output pool names (space-separated, paired with inputs)')
     fitness_parser.add_argument('--min_input', type=int, default=10, help='Minimum count threshold in input pools (default: 10)')
     fitness_parser.add_argument('--aa_filter', type=str, default=None, help='Filter mutability plot to specific mutant amino acid (e.g., S for serine, P for proline, * for stop codons)')
+    fitness_parser.add_argument('--group_by_reference', action='store_true', help='Generate separate plots per reference template (requires REFERENCE_ID column in input)')
     
     # GUI command
     gui_parser = subparsers.add_parser('gui', help='Launch interactive web-based GUI')
@@ -852,6 +887,14 @@ Examples:
         print("=" * 60)
         print("NGS POOL COUNTING")
         print("=" * 60)
+        # Load ReferenceManager for multi-reference support
+        print("\nLoading reference sequence(s)...")
+        ref_manager = ReferenceManager(args.reference)
+        print(ref_manager.get_reference_info())
+        if ref_manager.is_multi_reference():
+            print("Multi-reference mode: using reference-specific AA translations")
+        print()
+
         success = ngs_count.run_ngs_count(
             args.pools_dir,
             args.consensus_dir,
@@ -860,7 +903,7 @@ Examples:
             args.umi_len,
             args.umi_loc,
             args.output,
-            args.reference,
+            ref_manager,  # Pass ReferenceManager instead of file path
             args.left_ignore,
             args.right_ignore
         )
@@ -874,7 +917,8 @@ Examples:
             args.input_pools,
             args.output_pools,
             args.min_input,
-            args.aa_filter
+            args.aa_filter,
+            getattr(args, 'group_by_reference', False)
         )
     elif args.command == 'gui':
         try:

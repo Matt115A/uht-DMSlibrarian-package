@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uht-dmslibrarian"
-version = "0.1.4"
+version = "0.1.5"
 description = "Extension of the UMIC-seq Pipeline - Complete pipeline for dictionary building and NGS count inetgration, with fitness calculations, error modelling and mutation analysis"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Matt Penner", email = "mp957@cam.ac.uk"}
 ]
@@ -16,7 +16,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.10",
 ]
 keywords = ["bioinformatics", "pacbio", "umi", "sequencing", "variant", "calling"]

@@ -2,6 +2,9 @@
 """
 Sensitive variant calling pipeline that calls ALL variants, including single mismatches.
 Uses custom SAM parsing to bypass bcftools filtering.
+
+Supports multi-reference mode: when multiple references are provided, the pipeline
+identifies the best-matching reference for each consensus before variant calling.
 """
 
 import os
@@ -14,14 +17,39 @@ from pathlib import Path
 import tempfile
 import shutil
 import re
+from typing import Optional, Tuple, Union
 
-def extract_variants_from_sam(sam_file, reference_file, output_vcf):
-    """Extract all variants from SAM alignment and create VCF."""
-    
-    # Read reference sequence
-    with open(reference_file, 'r') as f:
-        ref_lines = [line.strip() for line in f if not line.startswith('>')]
-        ref_seq = ''.join(ref_lines)
+# Import ReferenceManager for multi-reference support
+try:
+    from .reference_manager import ReferenceManager
+except ImportError:
+    ReferenceManager = None
+
+
+def extract_variants_from_sam(sam_file, reference_file_or_seq, output_vcf,
+                              reference_id: Optional[str] = None):
+    """
+    Extract all variants from SAM alignment and create VCF.
+
+    Args:
+        sam_file: Path to SAM alignment file
+        reference_file_or_seq: Either a path to reference FASTA file or the reference
+                               sequence string directly
+        output_vcf: Path to output VCF file
+        reference_id: Optional reference ID to include in VCF (for multi-ref mode)
+
+    Returns:
+        Number of variants found
+    """
+    # Determine if we have a file path or direct sequence
+    if os.path.isfile(reference_file_or_seq):
+        # Read reference sequence from file
+        with open(reference_file_or_seq, 'r') as f:
+            ref_lines = [line.strip() for line in f if not line.startswith('>')]
+            ref_seq = ''.join(ref_lines)
+    else:
+        # Use directly as sequence
+        ref_seq = reference_file_or_seq
     
     # Read SAM alignment
     # Use dictionary to deduplicate variants by position (chr:pos:ref:alt)
@@ -102,59 +130,156 @@ def extract_variants_from_sam(sam_file, reference_file, output_vcf):
     with open(output_vcf, 'w') as f:
         # VCF header
         f.write("##fileformat=VCFv4.2\n")
-        f.write(f"##reference={reference_file}\n")
+        # Include reference info - use ID if available, otherwise file path if it's a file
+        if reference_id:
+            f.write(f"##reference={reference_id}\n")
+        elif os.path.isfile(reference_file_or_seq):
+            f.write(f"##reference={reference_file_or_seq}\n")
         f.write("##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n")
         f.write("##INFO=<ID=AD,Number=R,Type=Integer,Description=\"Allelic Depth\">\n")
+        f.write("##INFO=<ID=REFERENCE_ID,Number=1,Type=String,Description=\"Reference template ID\">\n")
         f.write("##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n")
         f.write("##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allelic Depth\">\n")
         f.write("##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n")
         f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n")
-        
-        # Write variants
+
+        # Write variants with REFERENCE_ID in INFO field
         for var in variants:
+            info_field = "DP=1"
+            if reference_id:
+                info_field += f";REFERENCE_ID={reference_id}"
             f.write(f"{var['chr']}\t{var['pos']}\t.\t{var['ref']}\t{var['alt']}\t"
-                   f"{var['qual']}\tPASS\tDP=1\tGT:AD:DP\t1/1:0,1:1\n")
+                   f"{var['qual']}\tPASS\t{info_field}\tGT:AD:DP\t1/1:0,1:1\n")
     
     return len(variants)
 
-def align_and_call_variants_sensitive(consensus_file, reference_file, output_dir):
-    """Align consensus to reference and call ALL variants using sensitive method."""
+def align_and_call_variants_sensitive(consensus_file, reference_file_or_manager, output_dir):
+    """
+    Align consensus to reference and call ALL variants using sensitive method.
+
+    Args:
+        consensus_file: Path to consensus FASTA file
+        reference_file_or_manager: Either a path to reference FASTA file (single ref mode)
+                                   or a ReferenceManager instance (multi-ref mode)
+        output_dir: Output directory for VCF files
+
+    Returns:
+        VCF file path on success, or error message string on failure.
+        In multi-ref mode, also stores reference_id in the VCF INFO field.
+    """
     try:
         consensus_name = Path(consensus_file).stem
         vcf_file = os.path.join(output_dir, f"{consensus_name}.vcf")
-        
+
         # Skip if VCF already exists
         if os.path.exists(vcf_file):
             return vcf_file
-        
-        # Step 1: Align consensus to reference using minimap2
-        sam_file = os.path.join(output_dir, f"{consensus_name}.sam")
-        
-        # Run minimap2 alignment
-        minimap2_cmd = [
-            "minimap2",
-            "-ax", "map-ont",
-            "-t", "1",
-            reference_file,
-            consensus_file
-        ]
-        
-        with open(sam_file, 'w') as sam_out:
-            subprocess.run(minimap2_cmd, check=True, stdout=sam_out, stderr=subprocess.PIPE, text=True)
-        
-        # Step 2: Extract variants directly from SAM
-        variant_count = extract_variants_from_sam(sam_file, reference_file, vcf_file)
-        
-        # Clean up intermediate files
-        os.remove(sam_file)
-        
-        if variant_count == 0:
-            return f"No variants found for {consensus_name}"
-        
-        return vcf_file
-        
+
+        # Determine reference mode
+        is_multi_ref = (ReferenceManager is not None and
+                       isinstance(reference_file_or_manager, ReferenceManager))
+
+        # Multi-reference mode: identify best reference first
+        if is_multi_ref:
+            ref_manager = reference_file_or_manager
+            # Read consensus sequence for reference identification
+            with open(consensus_file, 'r') as f:
+                lines = [line.strip() for line in f if not line.startswith('>')]
+                consensus_seq = ''.join(lines)
+
+            # Identify best matching reference
+            best_ref_id, score, is_ambiguous = ref_manager.identify_best_reference(consensus_seq)
+
+            if best_ref_id == "UNASSIGNED":
+                return f"No good reference match for {consensus_name} (score: {score})"
+
+            # Get the reference sequence for this consensus
+            ref_seq = ref_manager.get_reference_sequence(best_ref_id)
+
+            # Create temp reference file for minimap2
+            ref_temp_file = ref_manager.get_reference_file(best_ref_id)
+            try:
+                # Step 1: Align consensus to identified reference using minimap2
+                sam_file = os.path.join(output_dir, f"{consensus_name}.sam")
+
+                minimap2_cmd = [
+                    "minimap2",
+                    "-ax", "map-ont",
+                    "-t", "1",
+                    ref_temp_file,
+                    consensus_file
+                ]
+
+                with open(sam_file, 'w') as sam_out:
+                    subprocess.run(minimap2_cmd, check=True, stdout=sam_out,
+                                 stderr=subprocess.PIPE, text=True)
+
+                # Step 2: Extract variants - pass reference sequence and ID directly
+                variant_count = extract_variants_from_sam(
+                    sam_file, ref_seq, vcf_file, reference_id=best_ref_id
+                )
+
+                # Clean up intermediate files
+                os.remove(sam_file)
+
+            finally:
+                # Clean up temp reference file
+                if ref_temp_file and os.path.exists(ref_temp_file):
+                    os.remove(ref_temp_file)
+
+            if variant_count == 0:
+                # Still write a minimal VCF with reference info for WT
+                _write_empty_vcf_with_ref(vcf_file, best_ref_id)
+                return vcf_file
+
+            return vcf_file
+
+        else:
+            # Single reference mode (backward compatible)
+            reference_file = reference_file_or_manager
+
+            # Step 1: Align consensus to reference using minimap2
+            sam_file = os.path.join(output_dir, f"{consensus_name}.sam")
+
+            # Run minimap2 alignment
+            minimap2_cmd = [
+                "minimap2",
+                "-ax", "map-ont",
+                "-t", "1",
+                reference_file,
+                consensus_file
+            ]
+
+            with open(sam_file, 'w') as sam_out:
+                subprocess.run(minimap2_cmd, check=True, stdout=sam_out,
+                             stderr=subprocess.PIPE, text=True)
+
+            # Step 2: Extract variants directly from SAM
+            variant_count = extract_variants_from_sam(sam_file, reference_file, vcf_file)
+
+            # Clean up intermediate files
+            os.remove(sam_file)
+
+            if variant_count == 0:
+                return f"No variants found for {consensus_name}"
+
+            return vcf_file
+
     except Exception as e:
         return f"Error processing {consensus_name}: {str(e)}"
+
+
+def _write_empty_vcf_with_ref(vcf_file: str, reference_id: str) -> None:
+    """Write a minimal VCF file with reference info for WT consensus (no variants)."""
+    with open(vcf_file, 'w') as f:
+        f.write("##fileformat=VCFv4.2\n")
+        f.write(f"##reference={reference_id}\n")
+        f.write("##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n")
+        f.write("##INFO=<ID=REFERENCE_ID,Number=1,Type=String,Description=\"Reference template ID\">\n")
+        f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n")
+        # Write a single placeholder entry marking this as WT for this reference
+        # Using position 0 as a marker (will be filtered out in downstream processing)
+        f.write(f"{reference_id}\t0\t.\t.\t.\t.\tWT\tREFERENCE_ID={reference_id}\t.\t.\n")
 
 def process_consensus_file_sensitive(consensus_file, reference_file, output_dir):
     """Process a single consensus file to generate VCF using sensitive method."""
@@ -176,59 +301,83 @@ def process_consensus_file_sensitive(consensus_file, reference_file, output_dir)
         return f"ERROR: {consensus_name} - {str(e)}"
 
 def combine_vcf_files(vcf_dir, output_vcf):
-    """Combine all VCF files into a single VCF with one entry per consensus."""
+    """
+    Combine all VCF files into a single VCF with one entry per consensus.
+
+    Preserves REFERENCE_ID from individual VCFs (for multi-reference mode).
+    """
     try:
         # Get list of VCF files
         vcf_files = []
         for file in os.listdir(vcf_dir):
             if file.endswith('.vcf'):
                 vcf_files.append(os.path.join(vcf_dir, file))
-        
+
         if not vcf_files:
             print("No VCF files found to combine")
             return False
-        
+
         print(f"Combining {len(vcf_files)} VCF files...")
-        
+
         # Create combined VCF header
         with open(output_vcf, 'w') as outfile:
             # Write VCF header
             outfile.write("##fileformat=VCFv4.2\n")
             outfile.write("##INFO=<ID=CLUSTER,Number=1,Type=String,Description=\"Cluster ID\">\n")
             outfile.write("##INFO=<ID=VARIANT_COUNT,Number=1,Type=Integer,Description=\"Number of variants in this consensus\">\n")
+            outfile.write("##INFO=<ID=REFERENCE_ID,Number=1,Type=String,Description=\"Reference template ID\">\n")
             outfile.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
-            
+
             # Process each VCF file
             for vcf_file in vcf_files:
                 cluster_name = Path(vcf_file).stem
-                
+
                 try:
-                    # Read VCF file and extract variants
+                    # Read VCF file and extract variants and reference ID
+                    reference_id = None
+                    variants = []
+
                     with open(vcf_file, 'r') as infile:
-                        variants = []
                         for line in infile:
-                            if line.startswith('#') or line.strip() == '':
+                            if line.startswith('##reference='):
+                                # Extract reference ID from header
+                                reference_id = line.strip().split('=', 1)[1]
+                            elif line.startswith('#') or line.strip() == '':
                                 continue
-                            
-                            parts = line.strip().split('\t')
-                            if len(parts) >= 8:
-                                # Add cluster information to INFO field
-                                info_parts = parts[7].split(';')
-                                info_parts.append(f"CLUSTER={cluster_name}")
-                                parts[7] = ';'.join(info_parts)
-                                variants.append('\t'.join(parts))
-                        
-                        # Write variants to combined VCF
-                        for variant in variants:
-                            outfile.write(variant + '\n')
-                            
+                            else:
+                                parts = line.strip().split('\t')
+                                if len(parts) >= 8:
+                                    # Skip WT marker entries (position 0)
+                                    if parts[1] == '0' and parts[6] == 'WT':
+                                        # Extract REFERENCE_ID from WT marker
+                                        for info_item in parts[7].split(';'):
+                                            if info_item.startswith('REFERENCE_ID='):
+                                                reference_id = info_item.split('=')[1]
+                                        continue
+
+                                    # Add cluster information to INFO field
+                                    info_parts = parts[7].split(';')
+                                    info_parts.append(f"CLUSTER={cluster_name}")
+
+                                    # Ensure REFERENCE_ID is present if we know it
+                                    has_ref_id = any(p.startswith('REFERENCE_ID=') for p in info_parts)
+                                    if reference_id and not has_ref_id:
+                                        info_parts.append(f"REFERENCE_ID={reference_id}")
+
+                                    parts[7] = ';'.join(info_parts)
+                                    variants.append('\t'.join(parts[:8]))  # Only first 8 columns
+
+                    # Write variants to combined VCF
+                    for variant in variants:
+                        outfile.write(variant + '\n')
+
                 except Exception as e:
                     print(f"Error processing {vcf_file}: {e}")
                     continue
-        
+
         print(f"Combined VCF written to: {output_vcf}")
         return True
-        
+
     except Exception as e:
         print(f"Error combining VCF files: {e}")
         return False

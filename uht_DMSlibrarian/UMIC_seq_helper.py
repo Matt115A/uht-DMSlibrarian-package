@@ -10,7 +10,19 @@
 
 import numpy as np
 from Bio import SeqIO
-from skbio.alignment import StripedSmithWaterman
+try:
+    from skbio.alignment import StripedSmithWaterman
+except ImportError:
+    # StripedSmithWaterman was removed in scikit-bio 0.6+
+    # This module is legacy and not used by the main pipeline
+    import warnings
+    warnings.warn(
+        "StripedSmithWaterman not available in this version of scikit-bio. "
+        "UMIC_seq_helper demultiplexing functions will not work. "
+        "Install scikit-bio<0.6 if you need demultiplexing functionality.",
+        ImportWarning
+    )
+    StripedSmithWaterman = None
 import multiprocessing
 import argparse
 from tqdm import tqdm

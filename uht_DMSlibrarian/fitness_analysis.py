@@ -69,11 +69,12 @@ def run_fitness_analysis(
     input_pools: List[str],
     output_pools: List[str],
     min_input: int = 10,
-    aa_filter: Optional[str] = None
+    aa_filter: Optional[str] = None,
+    group_by_reference: bool = False
 ) -> bool:
     """
     Run fitness analysis on merged counts CSV.
-    
+
     Args:
         input_csv: Path to merged_on_nonsyn_counts.csv
         output_dir: Directory to save plots and results
@@ -81,6 +82,7 @@ def run_fitness_analysis(
         output_pools: List of pool names that are outputs (paired with inputs)
         min_input: Minimum count threshold in input pools
         aa_filter: Optional amino acid to filter mutability plot (e.g., 'S')
+        group_by_reference: If True, generate separate plots per reference template
     """
     try:
         print("=" * 60)
@@ -95,14 +97,29 @@ def run_fitness_analysis(
         print(f"Input pools: {input_pools}")
         print(f"Output pools: {output_pools}")
         print(f"Min input threshold: {min_input}")
-        
+        print(f"Group by reference: {group_by_reference}")
+
         # Load data
         print(f"\nLoading data from: {input_csv}")
         df = pd.read_csv(input_csv)
         print(f"Loaded {len(df)} rows")
-        
+
+        # Check for REFERENCE_ID column (multi-reference mode)
+        has_reference_id = 'REFERENCE_ID' in df.columns
+        if has_reference_id:
+            unique_refs = df['REFERENCE_ID'].unique()
+            print(f"Found {len(unique_refs)} reference templates: {', '.join(sorted(unique_refs))}")
+            for ref_id in sorted(unique_refs):
+                ref_count = len(df[df['REFERENCE_ID'] == ref_id])
+                print(f"  {ref_id}: {ref_count:,} rows")
+        else:
+            if group_by_reference:
+                print("WARNING: --group_by_reference specified but REFERENCE_ID column not found in data")
+                print("         Proceeding without reference grouping")
+                group_by_reference = False
+
         # Get all pool columns (exclude metadata columns)
-        metadata_cols = ['AA_MUTATIONS', 'CONSENSUS_IDS', 'NUC_MUTATIONS']
+        metadata_cols = ['AA_MUTATIONS', 'CONSENSUS_IDS', 'NUC_MUTATIONS', 'REFERENCE_ID']
         all_pool_cols = [col for col in df.columns if col not in metadata_cols]
         
         # Validate pool names exist
@@ -200,12 +217,72 @@ def run_fitness_analysis(
         
         # 6. Substitution matrix heatmap
         plot_substitution_matrix(df_filtered, output_dir)
-        
+
+        # 7. Per-reference analysis (if requested and REFERENCE_ID present)
+        if group_by_reference and has_reference_id:
+            print("\n" + "=" * 60)
+            print("GENERATING PER-REFERENCE PLOTS")
+            print("=" * 60)
+
+            unique_refs = df_filtered['REFERENCE_ID'].unique()
+            for ref_id in sorted(unique_refs):
+                print(f"\n--- Reference: {ref_id} ---")
+                ref_df = df_filtered[df_filtered['REFERENCE_ID'] == ref_id].copy()
+                print(f"    {len(ref_df):,} variants")
+
+                if len(ref_df) == 0:
+                    print(f"    Skipping {ref_id}: no data after filtering")
+                    continue
+
+                # Create subdirectory for this reference
+                ref_output_dir = os.path.join(output_dir, f"ref_{ref_id}")
+                os.makedirs(ref_output_dir, exist_ok=True)
+
+                # Save per-reference processed data
+                ref_csv = os.path.join(ref_output_dir, f'fitness_analysis_{ref_id}.csv')
+                ref_df.to_csv(ref_csv, index=False)
+
+                # Generate per-reference plots
+                try:
+                    plot_mutability(ref_df, ref_output_dir, aa_filter)
+                except Exception as e:
+                    print(f"    Warning: mutability plot failed: {e}")
+
+                try:
+                    plot_epistasis_single_double(ref_df, ref_output_dir)
+                except Exception as e:
+                    print(f"    Warning: epistasis plot failed: {e}")
+
+                try:
+                    plot_fitness_distributions(ref_df, ref_output_dir)
+                except Exception as e:
+                    print(f"    Warning: fitness distribution plot failed: {e}")
+
+                try:
+                    plot_hamming_distributions(ref_df, ref_output_dir)
+                except Exception as e:
+                    print(f"    Warning: hamming distribution plot failed: {e}")
+
+                if len(fitness_cols) >= 2:
+                    try:
+                        plot_reproducibility(ref_df, ref_output_dir, fitness_cols)
+                    except Exception as e:
+                        print(f"    Warning: reproducibility plot failed: {e}")
+
+                try:
+                    plot_substitution_matrix(ref_df, ref_output_dir)
+                except Exception as e:
+                    print(f"    Warning: substitution matrix failed: {e}")
+
+                print(f"    Plots saved to: {ref_output_dir}")
+
         print(f"\n{'='*60}")
         print("FITNESS ANALYSIS COMPLETE")
         print(f"{'='*60}")
         print(f"Results saved to: {output_dir}")
-        
+        if group_by_reference and has_reference_id:
+            print(f"Per-reference results in subdirectories: ref_*/")
+
         return True
         
     except Exception as e:
@@ -768,16 +845,19 @@ Examples:
                        help='Minimum count threshold in input pools (default: 10)')
     parser.add_argument('--aa_filter', type=str, default=None,
                        help='Filter mutability plot to specific mutant amino acid (e.g., S for serine, P for proline, * for stop codons)')
-    
+    parser.add_argument('--group_by_reference', action='store_true',
+                       help='Generate separate plots per reference template (requires REFERENCE_ID column in input)')
+
     args = parser.parse_args()
-    
+
     success = run_fitness_analysis(
         args.input,
         args.output_dir,
         args.input_pools,
         args.output_pools,
         args.min_input,
-        args.aa_filter
+        args.aa_filter,
+        args.group_by_reference
     )
     
     sys.exit(0 if success else 1)

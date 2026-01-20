@@ -10,17 +10,26 @@ NGS pool counting via UMI-to-consensus exact matching (circular, both strands).
   columns = pools
 
 Designed for low memory and speed: consensus index built once; reads streamed.
+
+Supports multi-reference mode: when REFERENCE_ID is present in VCF, uses the correct
+reference sequence for each cluster's AA translation.
 """
 
 import os
 import sys
 import gzip
 from pathlib import Path
-from typing import Dict, List, Tuple, Iterable
+from typing import Dict, List, Tuple, Iterable, Optional
 import traceback
 import subprocess
 from Bio import SeqIO
 from Bio.Seq import Seq
+
+# Import ReferenceManager for multi-reference support
+try:
+    from .reference_manager import ReferenceManager
+except ImportError:
+    ReferenceManager = None
 
 # Force immediate output - write directly to stderr if needed
 if hasattr(sys.stdout, 'reconfigure'):
@@ -204,29 +213,61 @@ def read_vcf_variants(vcf_path: str) -> List[Tuple[str, int, str, str]]:
     return rows
 
 
-def read_vcf_haplotype(vcf_path: str) -> Tuple[str, List[Tuple[str, int, str, str]]]:
-    """Return a semicolon-joined, position-sorted mutation list and list of variant tuples.
+def read_vcf_haplotype(vcf_path: str) -> Tuple[str, List[Tuple[str, int, str, str]], Optional[str]]:
+    """
+    Return a semicolon-joined, position-sorted mutation list, list of variant tuples,
+    and reference ID (if present in VCF).
+
     Format per mutation: CHROM:POS:REF>ALT. Returns empty string if no variants.
+
+    Returns:
+        Tuple of (mutations_string, variants_list, reference_id)
     """
     muts = []
     variants = []
+    reference_id = None
+
     if not os.path.exists(vcf_path):
-        return '', variants
+        return '', variants, None
+
     with open(vcf_path, 'r') as f:
         for line in f:
-            if not line or line.startswith('#'):
+            if not line:
+                continue
+            if line.startswith('##reference='):
+                reference_id = line.strip().split('=', 1)[1]
+                continue
+            if line.startswith('#'):
                 continue
             parts = line.strip().split('\t')
             if len(parts) < 5:
                 continue
+
+            # Skip WT marker entries (position 0)
+            if parts[1] == '0' and len(parts) > 6 and parts[6] == 'WT':
+                # Extract REFERENCE_ID from WT marker
+                if len(parts) > 7:
+                    for info_item in parts[7].split(';'):
+                        if info_item.startswith('REFERENCE_ID='):
+                            reference_id = info_item.split('=')[1]
+                continue
+
             chrom = parts[0] if parts[0] else parts[2]
             pos = int(parts[1])
             ref = parts[3]
             alt = parts[4].split(',')[0]
+
+            # Extract REFERENCE_ID from INFO field if present
+            if len(parts) > 7:
+                for info_item in parts[7].split(';'):
+                    if info_item.startswith('REFERENCE_ID='):
+                        reference_id = info_item.split('=')[1]
+
             variants.append((chrom, pos, ref, alt))
             muts.append((pos, f"{chrom}:{pos}:{ref}>{alt}"))
+
     muts.sort(key=lambda x: x[0])
-    return ';'.join(m for _, m in muts), variants
+    return ';'.join(m for _, m in muts), variants, reference_id
 
 
 def collect_all_variant_rows(variants_dir: str) -> Tuple[List[Tuple[str,int,str,str]], Dict[str, List[int]]]:
@@ -251,19 +292,51 @@ def collect_all_variant_rows(variants_dir: str) -> Tuple[List[Tuple[str,int,str,
     return rows, per_consensus
 
 
-def collect_haplotype_rows(variants_dir: str, ref_seq: str) -> Tuple[List[Tuple[str, str, str]], Dict[str, int]]:
-    """Return list of (consensus, mutations_str, aa_mutations_str) and mapping from consensus name to row index."""
-    rows: List[Tuple[str, str, str]] = []
+def collect_haplotype_rows(variants_dir: str, ref_seq_or_manager) -> Tuple[List[Tuple[str, str, str, str]], Dict[str, int]]:
+    """
+    Return list of (consensus, mutations_str, aa_mutations_str, reference_id) and mapping from consensus name to row index.
+
+    Args:
+        variants_dir: Directory containing per-consensus VCF files
+        ref_seq_or_manager: Either a reference sequence string (single ref mode)
+                           or ReferenceManager instance (multi-ref mode)
+
+    Returns:
+        Tuple of (rows list, index dict)
+        - rows: [(name, mutations_str, aa_mutations_str, reference_id), ...]
+        - index: {consensus_name: row_index}
+    """
+    rows: List[Tuple[str, str, str, str]] = []
     index: Dict[str, int] = {}
-    ref = Seq(ref_seq)
-    
+
+    # Determine reference mode
+    is_multi_ref = (ReferenceManager is not None and
+                   isinstance(ref_seq_or_manager, ReferenceManager))
+
+    if is_multi_ref:
+        ref_manager = ref_seq_or_manager
+        # Build lookup dict for reference sequences
+        ref_sequences: Dict[str, Seq] = {}
+        for ref_id in ref_manager.get_reference_ids():
+            ref_sequences[ref_id] = Seq(ref_manager.get_reference_sequence(ref_id))
+        default_ref_id = ref_manager.get_default_reference_id()
+    else:
+        # Single reference mode
+        ref_seq = ref_seq_or_manager
+        default_ref_id = "reference"
+        ref_sequences = {default_ref_id: Seq(ref_seq)}
+
     for fn in os.listdir(variants_dir):
         if not fn.endswith('.vcf'):
             continue
         name = Path(fn).stem
         vpath = os.path.join(variants_dir, fn)
-        muts_str, variants = read_vcf_haplotype(vpath)
-        
+        muts_str, variants, vcf_ref_id = read_vcf_haplotype(vpath)
+
+        # Determine which reference to use for this consensus
+        ref_id = vcf_ref_id if vcf_ref_id and vcf_ref_id in ref_sequences else default_ref_id
+        ref = ref_sequences[ref_id]
+
         # Convert to amino acid mutations - prevariant neess fall within codon
         codons: Dict[int, List[Tuple[int, str, str]]] = {}
         for chrom, pos, ref_allele, alt_allele in variants:
@@ -272,17 +345,17 @@ def collect_haplotype_rows(variants_dir: str, ref_seq: str) -> Tuple[List[Tuple[
             if codon_pos not in codons:
                 codons[codon_pos] = []
             codons[codon_pos].append((pos_0, ref_allele, alt_allele))
-        
+
         aa_muts = []
         for codon_pos in sorted(codons.keys()):
             codon_start = codon_pos * 3
             if codon_start + 3 > len(ref):
                 # Codon extends beyond reference, skip this codon
                 continue
-            
+
             wt_codon = str(ref[codon_start:codon_start + 3])
             mut_codon = list(wt_codon)
-            
+
             # Apply all mutations in this codon
             valid = True
             for pos_0, ref_allele, alt_allele in codons[codon_pos]:
@@ -295,24 +368,24 @@ def collect_haplotype_rows(variants_dir: str, ref_seq: str) -> Tuple[List[Tuple[
                 else:
                     valid = False
                     break
-            
+
             if not valid:
                 # Fallback: record as codon number (amino acid position)
                 wt_aa = str(Seq(wt_codon).translate())
                 aa_muts.append(f"{wt_aa}{codon_pos + 1}X")
                 continue
-            
+
             mut_codon_str = ''.join(mut_codon)
             wt_aa = str(Seq(wt_codon).translate())
             mut_aa = str(Seq(mut_codon_str).translate())
-            
+
             if wt_aa != mut_aa:
                 # Non-synonymous - record as amino acid
                 aa_muts.append(f"{wt_aa}{codon_pos + 1}{mut_aa}")
             # Skip synonymous mutations (silent changes)
-        
+
         aa_muts_str = '+'.join(aa_muts) if aa_muts else 'WT'
-        rows.append((name, muts_str, aa_muts_str))
+        rows.append((name, muts_str, aa_muts_str, ref_id))
         index[name] = len(rows) - 1
     return rows, index
 
@@ -387,8 +460,27 @@ def find_r1_r2_pairs(folder: str) -> List[Tuple[str, str]]:
 
 
 def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_fasta: str,
-                  umi_len: int, umi_loc: str, output_csv: str, reference_fasta: str,
+                  umi_len: int, umi_loc: str, output_csv: str, reference_fasta_or_manager,
                   left_ignore: int = 22, right_ignore: int = 24) -> bool:
+    """
+    Run NGS pool counting.
+
+    Args:
+        pools_dir: Directory containing per-pool folders with R1/R2 fastqs
+        consensus_dir: Consensus directory (from consensus step)
+        variants_dir: Variants directory with per-consensus VCFs
+        probe_fasta: Probe FASTA file
+        umi_len: UMI length
+        umi_loc: UMI location ('up' or 'down')
+        output_csv: Output counts CSV file
+        reference_fasta_or_manager: Either path to reference FASTA (single ref mode)
+                                    or ReferenceManager instance (multi-ref mode)
+        left_ignore: Bases to ignore from start of assembled read
+        right_ignore: Bases to ignore from end of assembled read
+
+    Returns:
+        True on success, False on failure
+    """
     try:
         print("Starting...", flush=True)
         print("Loading probe sequences...", flush=True)
@@ -406,11 +498,22 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         print("Collecting variant rows...", flush=True)
         var_rows, per_consensus = collect_all_variant_rows(variants_dir)
         print(f"Found {len(var_rows)} unique variant rows across {len(per_consensus)} consensus", flush=True)
-        
-        print("Loading reference sequence...", flush=True)
-        ref_record = SeqIO.read(reference_fasta, "fasta")
-        ref_seq = str(ref_record.seq)
-        print(f"Reference length: {len(ref_seq)} bp", flush=True)
+
+        # Determine reference mode
+        is_multi_ref = (ReferenceManager is not None and
+                       isinstance(reference_fasta_or_manager, ReferenceManager))
+
+        if is_multi_ref:
+            ref_manager = reference_fasta_or_manager
+            print("Loading references (multi-reference mode)...", flush=True)
+            print(ref_manager.get_reference_info(), flush=True)
+            ref_seq_or_manager = ref_manager
+        else:
+            print("Loading reference sequence...", flush=True)
+            ref_record = SeqIO.read(reference_fasta_or_manager, "fasta")
+            ref_seq = str(ref_record.seq)
+            print(f"Reference length: {len(ref_seq)} bp", flush=True)
+            ref_seq_or_manager = ref_seq
 
         print(f"Finding pool folders in: {pools_dir}", flush=True)
         pool_folders = find_pool_folders(pools_dir)
@@ -423,7 +526,7 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
 
     counts = [[0 for _ in pool_folders] for _ in range(len(var_rows))]
     # Haplotype rows (consensus-level, preserve multi-mutations)
-    hap_rows, hap_index = collect_haplotype_rows(variants_dir, ref_seq)
+    hap_rows, hap_index = collect_haplotype_rows(variants_dir, ref_seq_or_manager)
     hap_counts = [[0 for _ in pool_folders] for _ in range(len(hap_rows))]
 
     for j, pool in enumerate(pool_folders):
@@ -544,24 +647,27 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
             chrom, pos, ref, alt = key
             row = [str(chrom), str(pos), ref, alt] + [str(counts[i][j]) for j in range(len(pool_folders))]
             out.write(','.join(row) + '\n')
-    # Write haplotype counts
+    # Write haplotype counts (now includes REFERENCE_ID)
     hap_csv = str(Path(output_csv).parent / 'pool_haplotype_counts.csv')
     print(f"Writing haplotype counts to: {hap_csv}")
     with open(hap_csv, 'w') as out:
-        header = ['CONSENSUS', 'MUTATIONS', 'AA_MUTATIONS'] + pool_names
+        header = ['CONSENSUS', 'REFERENCE_ID', 'MUTATIONS', 'AA_MUTATIONS'] + pool_names
         out.write(','.join(header) + '\n')
-        for i, (cons_name, muts, aa_muts) in enumerate(hap_rows):
-            row = [cons_name, muts, aa_muts] + [str(hap_counts[i][j]) for j in range(len(pool_folders))]
+        for i, (cons_name, muts, aa_muts, ref_id) in enumerate(hap_rows):
+            row = [cons_name, ref_id, muts, aa_muts] + [str(hap_counts[i][j]) for j in range(len(pool_folders))]
             out.write(','.join(row) + '\n')
 
-    # Write counts merged on non-synonymous amino acid mutations
+    # Write counts merged on non-synonymous amino acid mutations (now includes REFERENCE_ID)
     merged_csv = str(Path(output_csv).parent / 'merged_on_nonsyn_counts.csv')
     print(f"Writing merged non-synonymous counts to: {merged_csv}")
-    merged: Dict[str, Dict[str, object]] = {}
-    for i, (cons_name, muts, aa_muts) in enumerate(hap_rows):
-        entry = merged.setdefault(aa_muts, {
+    # Merge by (reference_id, aa_mutations) tuple to keep genes separate
+    merged: Dict[Tuple[str, str], Dict[str, object]] = {}
+    for i, (cons_name, muts, aa_muts, ref_id) in enumerate(hap_rows):
+        key = (ref_id, aa_muts)
+        entry = merged.setdefault(key, {
             'consensus': [],
             'mutations': set(),
+            'reference_id': ref_id,
             'counts': [0] * len(pool_folders)
         })
         entry['consensus'].append(cons_name)
@@ -572,13 +678,13 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
             counts_row[j] += hap_counts[i][j]
 
     with open(merged_csv, 'w') as out:
-        header = ['AA_MUTATIONS', 'CONSENSUS_IDS', 'NUC_MUTATIONS'] + pool_names
+        header = ['REFERENCE_ID', 'AA_MUTATIONS', 'CONSENSUS_IDS', 'NUC_MUTATIONS'] + pool_names
         out.write(','.join(header) + '\n')
-        for aa_muts in sorted(merged.keys()):
-            entry = merged[aa_muts]
+        for (ref_id, aa_muts) in sorted(merged.keys()):
+            entry = merged[(ref_id, aa_muts)]
             consensus_ids = ';'.join(sorted(entry['consensus']))
             nuc_muts = ';'.join(sorted(entry['mutations'])) if entry['mutations'] else ''
-            row = [aa_muts, consensus_ids, nuc_muts] + [str(c) for c in entry['counts']]
+            row = [ref_id, aa_muts, consensus_ids, nuc_muts] + [str(c) for c in entry['counts']]
             out.write(','.join(row) + '\n')
     
     print("Done!")
