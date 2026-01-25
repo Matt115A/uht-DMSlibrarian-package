@@ -1075,7 +1075,8 @@ Examples:
     ngs_parser.add_argument('--left_ignore', type=int, default=22, help='Bases to ignore from start of assembled read (default: 22)')
     ngs_parser.add_argument('--right_ignore', type=int, default=24, help='Bases to ignore from end of assembled read (default: 24)')
     ngs_parser.add_argument('--pear_min_overlap', type=int, default=20, help='Minimum overlap length for PEAR read merging (default: 20)')
-    
+    ngs_parser.add_argument('--pear_yolo', action='store_true', help='Maximally permissive PEAR: disables p-value test (-p 1.0) and sets min overlap to 1 unless --pear_min_overlap is specified')
+
     # Fitness analysis command
     fitness_parser = subparsers.add_parser('fitness', help='Analyze fitness from merged non-synonymous counts')
     fitness_parser.add_argument('--input', required=True, help='Input CSV file (merged_on_nonsyn_counts.csv)')
@@ -1123,6 +1124,11 @@ Examples:
             print("Multi-reference mode: using reference-specific AA translations")
         print()
 
+        # Handle pear_yolo: if enabled and user didn't specify overlap, use 1
+        pear_overlap = args.pear_min_overlap
+        if args.pear_yolo and args.pear_min_overlap == 20:  # 20 is the default
+            pear_overlap = 1
+
         success = ngs_count.run_ngs_count(
             args.pools_dir,
             args.consensus_dir,
@@ -1134,7 +1140,8 @@ Examples:
             ref_manager,  # Pass ReferenceManager instead of file path
             args.left_ignore,
             args.right_ignore,
-            args.pear_min_overlap
+            pear_overlap,
+            args.pear_yolo
         )
     elif args.command == 'fitness':
         print("=" * 60)

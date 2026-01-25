@@ -201,6 +201,7 @@ Inputs:
 - `probe`: probe FASTA (used only for logging; UMI extraction for Illumina uses your defined trimming rules)
 - `reference`: reference FASTA for amino acid mapping (fasta should be bases)
 - `--pear_min_overlap` (default: 20): Minimum overlap length for PEAR read merging. Lower values allow merging of reads with shorter overlaps.
+- `--pear_yolo`: Maximally permissive PEAR settings. Disables the p-value statistical test (`-p 1.0`) and sets minimum overlap to 1 unless `--pear_min_overlap` is explicitly specified. Useful when reads have very short or variable overlaps.
 
 Outputs:
 - `pool_variant_counts.csv`: wide table, rows = VCF entries (CHROM, POS, REF, ALT), columns = pools

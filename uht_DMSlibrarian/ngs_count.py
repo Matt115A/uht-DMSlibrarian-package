@@ -462,7 +462,7 @@ def find_r1_r2_pairs(folder: str) -> List[Tuple[str, str]]:
 def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_fasta: str,
                   umi_len: int, umi_loc: str, output_csv: str, reference_fasta_or_manager,
                   left_ignore: int = 22, right_ignore: int = 24,
-                  pear_min_overlap: int = 20) -> bool:
+                  pear_min_overlap: int = 20, pear_yolo: bool = False) -> bool:
     """
     Run NGS pool counting.
 
@@ -479,6 +479,7 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         left_ignore: Bases to ignore from start of assembled read
         right_ignore: Bases to ignore from end of assembled read
         pear_min_overlap: Minimum overlap length for PEAR read merging (default: 20)
+        pear_yolo: If True, use maximally permissive PEAR settings (disables p-value test)
 
     Returns:
         True on success, False on failure
@@ -576,6 +577,9 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
                         '-q', '20',
                         '-v', str(pear_min_overlap)
                     ]
+                    if pear_yolo:
+                        cmd.extend(['-p', '1.0'])
+                        print("    (YOLO mode: p-value test disabled)", flush=True)
                     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     if not os.path.exists(assembled_fastq):
                         print("    WARNING: PEAR did not produce assembled reads; falling back to on-the-fly merge")
