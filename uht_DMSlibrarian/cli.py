@@ -114,122 +114,264 @@ def run_clustering(args):
 
 
 def run_consensus_generation(args):
-    """Run consensus generation step."""
+    """Run consensus generation step with memory safety mechanisms."""
     cluster_files_dir = args.input_dir
     output_dir = args.output_dir
     max_reads = args.max_reads
     max_workers = args.max_workers
-    
-    print(f"Starting simple consensus pipeline...")
+    max_seq_len = args.max_seq_len
+
+    # Import memory monitoring functions from simple_consensus_pipeline
+    from . import simple_consensus_pipeline
+    from .simple_consensus_pipeline import (
+        get_memory_percent,
+        get_available_memory_gb,
+        check_memory_pressure,
+        wait_for_memory_relief,
+        PSUTIL_AVAILABLE,
+        ConsensusErrorLogger
+    )
+
+    print(f"Starting simple consensus pipeline with memory safety...")
     print(f"Cluster files directory: {cluster_files_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Max reads per consensus: {max_reads}")
     print(f"Max workers: {max_workers}")
-    
+    print(f"Max sequence length: {max_seq_len}")
+
+    # Check if psutil is available for memory monitoring
+    if PSUTIL_AVAILABLE:
+        avail_mem = get_available_memory_gb()
+        mem_percent = get_memory_percent()
+        print(f"Memory monitoring: ENABLED")
+        print(f"Available memory: {avail_mem:.1f} GB ({100-mem_percent:.1f}% free)")
+    else:
+        print(f"Memory monitoring: DISABLED (install psutil for better safety)")
+        print(f"  Install with: pip install psutil")
+
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    # Create error logger for comprehensive error tracking
+    error_logger = ConsensusErrorLogger(output_dir)
+    print(f"Error log file: {error_logger.log_path}")
+
     # Get list of cluster files
     cluster_files = []
     for file in os.listdir(cluster_files_dir):
         if file.endswith('.fasta') and file.startswith('cluster_'):
             cluster_files.append(os.path.join(cluster_files_dir, file))
-    
+
     total_clusters = len(cluster_files)
     print(f"Found {total_clusters:,} cluster files to process")
-    
+
     if total_clusters == 0:
         print("No cluster files found!")
         return False
-    
+
     # Track progress
     success_count = 0
     failed_count = 0
+    memory_warnings = 0
     start_time = time.time()
-    
+
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import gc
-    
+
     # Thread-safe progress tracking
     progress_lock = threading.Lock()
-    
+
+    # Memory thresholds
+    MEMORY_WARNING_THRESHOLD = 80  # Warn when above 80%
+    MEMORY_CRITICAL_THRESHOLD = 90  # Pause when above 90%
+    MEMORY_RELIEF_THRESHOLD = 70   # Resume when below 70%
+
+    # Adaptive batch size based on memory
+    BASE_BATCH_SIZE = 100  # Reduced from 500 to prevent memory accumulation
+    current_batch_size = BASE_BATCH_SIZE
+
+    # Per-process memory limit (in MB)
+    ABPOA_MEMORY_LIMIT_MB = 1024  # 1GB per abpoa process
+
+    def get_adaptive_workers():
+        """Dynamically adjust worker count based on memory pressure."""
+        if not PSUTIL_AVAILABLE:
+            return max_workers
+
+        mem_percent = get_memory_percent()
+        if mem_percent is None:
+            return max_workers
+
+        if mem_percent > MEMORY_CRITICAL_THRESHOLD:
+            return max(1, max_workers // 4)  # Reduce to 25%
+        elif mem_percent > MEMORY_WARNING_THRESHOLD:
+            return max(1, max_workers // 2)  # Reduce to 50%
+        return max_workers
+
     def update_progress():
         nonlocal success_count, failed_count
         with progress_lock:
             processed = success_count + failed_count
             elapsed_time = time.time() - start_time
             rate = processed / elapsed_time if elapsed_time > 0 else 0
-            
+
             # Calculate ETA
             if rate > 0:
                 remaining = total_clusters - processed
                 eta_seconds = remaining / rate
                 eta_minutes = eta_seconds / 60
-                
+
                 if eta_minutes >= 1:
                     eta_str = f"{eta_minutes:.1f}m"
                 else:
                     eta_str = f"{eta_seconds:.0f}s"
             else:
                 eta_str = "unknown"
-            
+
             # Progress percentage
             progress_percent = (processed / total_clusters) * 100
-            
+
+            # Memory status
+            mem_str = ""
+            if PSUTIL_AVAILABLE:
+                mem_percent = get_memory_percent()
+                if mem_percent is not None:
+                    mem_str = f" | Mem: {mem_percent:.0f}%"
+
             # Print progress
             progress_line = (f"\rProgress: {progress_percent:.1f}% "
                            f"({processed:,}/{total_clusters:,}) | "
                            f"Success: {success_count:,} | Failed: {failed_count:,} | "
-                           f"Rate: {rate:.1f} clusters/s | ETA: {eta_str}")
-            
+                           f"Rate: {rate:.1f}/s | ETA: {eta_str}{mem_str}")
+
             print(progress_line, end='', flush=True)
-            
-            # Periodic garbage collection every 5000 clusters
-            if processed > 0 and processed % 5000 == 0:
+
+            # Aggressive garbage collection every 50 clusters for better memory control
+            if processed > 0 and processed % 50 == 0:
                 gc.collect()
-                print(f"\n[GC at {processed:,} clusters]", flush=True)
-    
-    # Process clusters in parallel with batched submission
-    BATCH_SIZE = 1000  # Submit 1000 at a time to avoid memory buildup
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for batch_start in range(0, total_clusters, BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE, total_clusters)
-            batch_files = cluster_files[batch_start:batch_end]
-            
-            # Submit batch
-            futures = {executor.submit(simple_consensus_pipeline.process_cluster_simple, cf, output_dir, max_reads): cf 
-                      for cf in batch_files}
-            
-            # Process as they complete
+
+    # Process clusters in parallel with memory-aware batching
+    processed_total = 0
+    batch_num = 0
+
+    while processed_total < total_clusters:
+        batch_num += 1
+
+        # Check memory before starting a new batch
+        if PSUTIL_AVAILABLE and check_memory_pressure(MEMORY_CRITICAL_THRESHOLD):
+            print(f"\n[WARNING] High memory usage detected ({get_memory_percent():.0f}%)! "
+                  f"Pausing for memory relief...", flush=True)
+            memory_warnings += 1
+
+            # Force garbage collection
+            gc.collect()
+
+            # Wait for memory to recover
+            if not wait_for_memory_relief(MEMORY_RELIEF_THRESHOLD, timeout=120, check_interval=5):
+                print(f"\n[WARNING] Memory still high after waiting. "
+                      f"Continuing with reduced workers...", flush=True)
+
+        # Adaptive batch size based on memory
+        if PSUTIL_AVAILABLE:
+            mem_percent = get_memory_percent()
+            if mem_percent and mem_percent > MEMORY_WARNING_THRESHOLD:
+                current_batch_size = max(100, BASE_BATCH_SIZE // 2)
+            else:
+                current_batch_size = BASE_BATCH_SIZE
+        else:
+            current_batch_size = BASE_BATCH_SIZE
+
+        # Calculate batch boundaries
+        batch_start = processed_total
+        batch_end = min(batch_start + current_batch_size, total_clusters)
+        batch_files = cluster_files[batch_start:batch_end]
+        batch_size = len(batch_files)
+
+        # Determine number of workers for this batch
+        effective_workers = get_adaptive_workers()
+
+        # Submit and process batch
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {
+                executor.submit(
+                    simple_consensus_pipeline.process_cluster_simple,
+                    cf, output_dir, max_reads, ABPOA_MEMORY_LIMIT_MB, max_seq_len, error_logger
+                ): cf
+                for cf in batch_files
+            }
+
+            # Process as they complete - CRITICAL: delete futures to prevent memory leak
             for future in as_completed(futures):
-                result = future.result()
-                
-                with progress_lock:
-                    if "SUCCESS" in result:
-                        success_count += 1
-                    else:
+                try:
+                    result = future.result(timeout=60)  # 60 second timeout per result
+
+                    with progress_lock:
+                        if "SUCCESS" in result:
+                            success_count += 1
+                        elif "MEMORY_ERROR" in result:
+                            failed_count += 1
+                            memory_warnings += 1
+                            gc.collect()  # Immediate GC on memory errors
+                            if memory_warnings <= 5:
+                                print(f"\n[Memory error]: {result}", flush=True)
+                        else:
+                            failed_count += 1
+                            if failed_count <= 10:
+                                print(f"\nFailed: {result}", flush=True)
+
+                    # MEMORY LEAK FIX: explicitly delete result to free memory
+                    del result
+
+                except Exception as e:
+                    with progress_lock:
                         failed_count += 1
-                        if failed_count <= 10:  # Only show first 10 failures
-                            print(f"\nFailed: {result}")
-                
+                        if failed_count <= 10:
+                            print(f"\nException: {str(e)}", flush=True)
+
+                # MEMORY LEAK FIX: remove future from dict to release reference
+                del futures[future]
+
                 update_progress()
-    
+
+        # Update progress counter
+        processed_total = batch_end
+
+        # Force GC between batches
+        gc.collect()
+
+        # Small pause between batches to allow system to stabilize
+        if PSUTIL_AVAILABLE and check_memory_pressure(MEMORY_WARNING_THRESHOLD):
+            time.sleep(1)  # Brief pause under memory pressure
+
+    # Write error summary to log file
+    error_logger.write_summary(total_clusters, success_count, failed_count)
+
     # Final summary
     total_time = time.time() - start_time
     print(f"\n\nConsensus generation completed!")
     print(f"Total clusters processed: {total_clusters:,}")
     print(f"Successful: {success_count:,}")
     print(f"Failed: {failed_count:,}")
+    if memory_warnings > 0:
+        print(f"Memory warnings: {memory_warnings}")
     print(f"Total time: {total_time/60:.1f} minutes")
     print(f"Output directory: {output_dir}")
-    
+
+    # Print error breakdown if there were failures
+    if failed_count > 0:
+        error_counts = error_logger.get_error_counts()
+        print(f"\nError breakdown:")
+        for error_type, count in sorted(error_counts.items(), key=lambda x: -x[1]):
+            print(f"  {error_type}: {count:,}")
+        print(f"\nFull error details saved to: {error_logger.log_path}")
+
     return success_count > 0
 
 
 def run_variant_calling(args, ref_manager=None):
     """
-    Run variant calling step.
+    Run variant calling step with memory safety mechanisms.
 
     Args:
         args: Namespace with input_dir, reference, output_dir, combined_vcf, max_workers
@@ -242,8 +384,18 @@ def run_variant_calling(args, ref_manager=None):
     combined_vcf = args.combined_vcf
     max_workers = args.max_workers
 
+    # Import memory monitoring functions
+    from .simple_consensus_pipeline import (
+        get_memory_percent,
+        get_available_memory_gb,
+        check_memory_pressure,
+        wait_for_memory_relief,
+        PSUTIL_AVAILABLE
+    )
+    import gc
+
     print(f"\n{'='*60}")
-    print(f"RUNNING: Variant Calling")
+    print(f"RUNNING: Variant Calling (with memory safety)")
     print(f"{'='*60}")
 
     start_time = time.time()
@@ -263,6 +415,12 @@ def run_variant_calling(args, ref_manager=None):
     print(f"Output directory: {output_dir}")
     print(f"Combined VCF: {combined_vcf}")
 
+    # Memory status
+    if PSUTIL_AVAILABLE:
+        avail_mem = get_available_memory_gb()
+        mem_percent = get_memory_percent()
+        print(f"Memory: {avail_mem:.1f} GB available ({100-mem_percent:.1f}% free)")
+
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
@@ -278,10 +436,30 @@ def run_variant_calling(args, ref_manager=None):
     # Track progress
     success_count = 0
     failed_count = 0
+    memory_warnings = 0
 
     # Thread-safe progress tracking
     import threading
     progress_lock = threading.Lock()
+
+    # Memory thresholds
+    MEMORY_WARNING_THRESHOLD = 80
+    MEMORY_CRITICAL_THRESHOLD = 90
+    MEMORY_RELIEF_THRESHOLD = 70
+    BASE_BATCH_SIZE = 500
+
+    def get_adaptive_workers():
+        """Dynamically adjust worker count based on memory pressure."""
+        if not PSUTIL_AVAILABLE:
+            return max_workers
+        mem_percent = get_memory_percent()
+        if mem_percent is None:
+            return max_workers
+        if mem_percent > MEMORY_CRITICAL_THRESHOLD:
+            return max(1, max_workers // 4)
+        elif mem_percent > MEMORY_WARNING_THRESHOLD:
+            return max(1, max_workers // 2)
+        return max_workers
 
     def update_progress():
         nonlocal success_count, failed_count
@@ -314,6 +492,13 @@ def run_variant_calling(args, ref_manager=None):
             else:
                 elapsed_str = f"{elapsed_time:.0f}s"
 
+            # Memory status
+            mem_str = ""
+            if PSUTIL_AVAILABLE:
+                mp = get_memory_percent()
+                if mp is not None:
+                    mem_str = f" | Mem: {mp:.0f}%"
+
             # Progress bar
             progress_percent = (processed / total_consensus) * 100
             bar_length = 50
@@ -324,32 +509,69 @@ def run_variant_calling(args, ref_manager=None):
             progress_line = (f"\rProgress: |{bar}| {progress_percent:.1f}% "
                            f"({processed:,}/{total_consensus:,}) | "
                            f"Success: {success_count:,} | Failed: {failed_count:,} | "
-                           f"Rate: {rate:.1f} consensus/s | ETA: {eta_str} | "
-                           f"Elapsed: {elapsed_str}")
+                           f"Rate: {rate:.1f}/s | ETA: {eta_str}{mem_str}")
 
             print(progress_line, end='', flush=True)
 
-    # Process consensus files in parallel with batched submission
+            # Periodic GC
+            if processed > 0 and processed % 1000 == 0:
+                gc.collect()
+
+    # Process consensus files with memory-aware batching
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(sensitive_variant_pipeline.process_consensus_file_sensitive,
-                                  cf, reference_for_calling, output_dir): cf
-                  for cf in consensus_files}
+    processed_total = 0
+    while processed_total < total_consensus:
+        # Check memory before batch
+        if PSUTIL_AVAILABLE and check_memory_pressure(MEMORY_CRITICAL_THRESHOLD):
+            print(f"\n[WARNING] High memory ({get_memory_percent():.0f}%)! Pausing...", flush=True)
+            memory_warnings += 1
+            gc.collect()
+            wait_for_memory_relief(MEMORY_RELIEF_THRESHOLD, timeout=120, check_interval=5)
 
-        # Process as they complete
-        for future in as_completed(futures):
-            result = future.result()
+        # Adaptive batch size
+        if PSUTIL_AVAILABLE:
+            mem_percent = get_memory_percent()
+            if mem_percent and mem_percent > MEMORY_WARNING_THRESHOLD:
+                current_batch_size = max(100, BASE_BATCH_SIZE // 2)
+            else:
+                current_batch_size = BASE_BATCH_SIZE
+        else:
+            current_batch_size = BASE_BATCH_SIZE
 
-            with progress_lock:
-                if "SUCCESS" in result:
-                    success_count += 1
-                else:
-                    failed_count += 1
-                    if failed_count <= 10:  # Only show first 10 failures
-                        print(f"\nFailed: {result}")
+        batch_start = processed_total
+        batch_end = min(batch_start + current_batch_size, total_consensus)
+        batch_files = consensus_files[batch_start:batch_end]
+        effective_workers = get_adaptive_workers()
 
-            update_progress()
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {
+                executor.submit(
+                    sensitive_variant_pipeline.process_consensus_file_sensitive,
+                    cf, reference_for_calling, output_dir
+                ): cf
+                for cf in batch_files
+            }
+
+            for future in as_completed(futures):
+                try:
+                    result = future.result(timeout=60)
+                    with progress_lock:
+                        if "SUCCESS" in result:
+                            success_count += 1
+                        else:
+                            failed_count += 1
+                            if failed_count <= 10:
+                                print(f"\nFailed: {result}", flush=True)
+                except Exception as e:
+                    with progress_lock:
+                        failed_count += 1
+                        if failed_count <= 10:
+                            print(f"\nException: {str(e)}", flush=True)
+                update_progress()
+
+        processed_total = batch_end
+        gc.collect()
 
     # Combine VCF files
     print(f"\n\nCombining VCF files...")
@@ -361,6 +583,8 @@ def run_variant_calling(args, ref_manager=None):
     print(f"Total consensus processed: {total_consensus:,}")
     print(f"Successful: {success_count:,}")
     print(f"Failed: {failed_count:,}")
+    if memory_warnings > 0:
+        print(f"Memory warnings: {memory_warnings}")
     print(f"Total time: {total_time/60:.1f} minutes")
     print(f"Average rate: {total_consensus/total_time:.1f} consensus/second")
     print(f"Individual VCF files: {output_dir}")
@@ -666,7 +890,8 @@ def run_full_pipeline(args):
         input_dir=cluster_dir,
         output_dir=consensus_dir,
         max_reads=args.max_reads,
-        max_workers=args.max_workers
+        max_workers=args.max_workers,
+        max_seq_len=args.max_seq_len
     )
     
     if not run_consensus_generation(consensus_args):
@@ -790,6 +1015,7 @@ Examples:
     all_parser.add_argument('--identity', type=float, default=0.90, help='Sequence identity for fast clustering (default: 0.90)')
     all_parser.add_argument('--size_thresh', type=int, default=10, help='Size threshold (default: 10)')
     all_parser.add_argument('--max_reads', type=int, default=20, help='Max reads per consensus (default: 20)')
+    all_parser.add_argument('--max_seq_len', type=int, default=15000, help='Max sequence length for consensus (default: 15000)')
     all_parser.add_argument('--max_workers', type=int, default=4, help='Max parallel workers (default: 4)')
     all_parser.add_argument('--fast', action='store_true', default=True, help='Use fast CD-HIT clustering (default: True)')
     all_parser.add_argument('--slow', action='store_true', help='Use slow alignment-based clustering')
@@ -821,6 +1047,7 @@ Examples:
     consensus_parser.add_argument('--input_dir', required=True, help='Input cluster directory')
     consensus_parser.add_argument('--output_dir', required=True, help='Output consensus directory')
     consensus_parser.add_argument('--max_reads', type=int, default=20, help='Max reads per consensus (default: 20)')
+    consensus_parser.add_argument('--max_seq_len', type=int, default=15000, help='Max sequence length for consensus (default: 15000)')
     consensus_parser.add_argument('--max_workers', type=int, default=4, help='Max parallel workers (default: 4)')
     
     variant_parser = subparsers.add_parser('variants', help='Call variants')
@@ -847,6 +1074,7 @@ Examples:
     ngs_parser.add_argument('--output', required=True, help='Output counts CSV file')
     ngs_parser.add_argument('--left_ignore', type=int, default=22, help='Bases to ignore from start of assembled read (default: 22)')
     ngs_parser.add_argument('--right_ignore', type=int, default=24, help='Bases to ignore from end of assembled read (default: 24)')
+    ngs_parser.add_argument('--pear_min_overlap', type=int, default=20, help='Minimum overlap length for PEAR read merging (default: 20)')
     
     # Fitness analysis command
     fitness_parser = subparsers.add_parser('fitness', help='Analyze fitness from merged non-synonymous counts')
@@ -905,7 +1133,8 @@ Examples:
             args.output,
             ref_manager,  # Pass ReferenceManager instead of file path
             args.left_ignore,
-            args.right_ignore
+            args.right_ignore,
+            args.pear_min_overlap
         )
     elif args.command == 'fitness':
         print("=" * 60)
@@ -938,4 +1167,3 @@ Examples:
 
 if __name__ == "__main__":
     sys.exit(main())
-

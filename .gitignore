@@ -32,6 +32,7 @@ test_*
 
 # Agent files
 CLAUDE.md
+AGENTS.md
 
 # Output directories
 UMIclusterfull_*

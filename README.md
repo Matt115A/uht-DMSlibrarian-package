@@ -1,15 +1,14 @@
 # uht-DMSlibrarian
 
-## Interactive GUI (IN DEV, STILL BUGGY!)
-
-The package includes a  web-based GUI for running the complete pipeline workflow interactively. Launch it with:
+## Interactive GUI
+The package includes a  web browser-based GUI for running the complete pipeline workflow interactively. Launch it with:
 
 ```bash
 umic-seq-pacbio gui
 ```
 
 This opens a web interface in your browser with three tabs:
-- **Pipeline**: Run the complete UMIC-seq PacBio pipeline from raw reads to variant analysis
+- **Dictionary**: Run the complete UMIC-seq PacBio (or ONT) pipeline from raw reads to variant analysis
 - **NGS Count**: Count Illumina reads per variant via UMI matching
 - **Fitness Analysis**: Calculate fitness from input/output pool comparisons
 
@@ -49,7 +48,7 @@ Please install both of these and ensure they are in the PATH of your environment
 **Required Arguments:**
 - `--input`: Input FASTQ file (can be .gz compressed)
 - `--probe`: Probe FASTA file containing an approximately 50 bp sequence adjacent to the UMI
-- `--reference`: Reference FASTA file containing 1-6 reference gene sequences. For multi-gene experiments, include multiple sequences in a single FASTA; the pipeline will automatically match each consensus to its best-matching reference.
+- `--reference`: Reference FASTA file containing 1 or more reference gene sequences. For multi-gene experiments, include multiple sequences in a single FASTA; the pipeline will automatically match each consensus to its best-matching reference with a tolerance of 5% sequence identity.
 - `--output_dir`: Output directory where all results will be written
 
 **Optional Arguments (with defaults):**
@@ -61,22 +60,23 @@ Please install both of these and ensure they are in the PATH of your environment
 
 **Clustering:**
 - `--fast` (default: True): Use fast CD-HIT clustering (recommended)
-- `--slow`: Use slow alignment-based clustering (alternative to --fast, legacy)
-- `--identity` (default: 0.90): Sequence identity threshold for fast clustering (0-1). 0.90 = 90% identity = allows up to 10% mismatch. For a 52bp UMI, this allows ~5 mismatches.
-- `--aln_thresh` (default: 0.47): Alignment score threshold for slow clustering (only used with --slow). Converts to integer score: 0.47 → 47. For a 52bp UMI with perfect match ≈ 104, threshold 47 ≈ 45% of perfect. **Note**: This is legacy and will be removed in future versions.
+- `--slow`: Use slow alignment-based clustering (alternative to --fast, legacy, no need to use)
+- `--identity` (default: 0.90): Sequence identity threshold for fast clustering (0-1). 0.90 = 90% identity = allows up to 10% mismatch. For a 52bp UMI, this allows ~5 mismatches. 0.9 is sensible to start with for ONT data.
+- `--aln_thresh` (default: 0.47, only used with --slow i.e. legacy): Alignment score threshold for slow clustering. Converts to integer score: 0.47 → 47. For a 52bp UMI with perfect match ≈ 104, threshold 47 ≈ 45% of perfect. **Note**: This is legacy and will be removed in future versions.
 - **Orientation normalization**: When `--probe` is provided during clustering, sequences are automatically normalized to forward orientation based on probe alignment before being written to cluster files. This ensures all sequences in a cluster have the same orientation, improving consensus quality. If `--probe` is not provided, sequences are written as-is (backward compatible).
 
 **Cluster Filtering:**
 - `--size_thresh` (default: 10): Minimum number of long reads required per cluster. Clusters with fewer reads are discarded. Lower values = more sensitive (detects rare variants), higher values = more conservative (only high-confidence variants).
 
 **Consensus Generation:**
-- `--max_reads` (default: 20): Maximum number of reads per cluster used for consensus generation. Uses first N reads from each cluster. More reads = better consensus quality but slower. Fewer reads = faster.
+- `--max_reads` (default: 20): Maximum number of reads per cluster used for consensus generation. Uses first N reads from each cluster. More reads = better consensus quality (this return of course diminishes) but slower. Fewer reads = faster.
+- `--max_seq_len` (default: 15000): Maximum sequence length (bp) allowed for consensus input. Sequences longer than this are skipped to avoid memory spikes.
 
 **Performance:**
 - `--max_workers` (default: 4): Number of parallel workers for consensus generation and variant calling. Increase for faster processing if you have more CPU cores available.
 
 **Reporting:**
-- `--report` (optional): Path to output report file. If provided, generates a comprehensive summary report including execution time, input parameters, pipeline statistics (UMIs extracted, clusters generated, consensus sequences, variants called), and output file locations.
+- `--report` (optional): Path to output report file. If provided, generates a comprehensive summary report including execution time, input parameters, pipeline statistics (UMIs extracted, clusters generated, consensus sequences, variants called), and output file locations. Should be a .txt file, not a directory.
 
 
 ### Pipeline Steps
@@ -145,6 +145,7 @@ umic-seq-pacbio consensus \
   --input_dir UMIclusterfull_fast \
   --output_dir consensus_results \
   --max_reads 20 \
+  --max_seq_len 15000 \
   --max_workers 4
 
 # Call variants
@@ -189,6 +190,7 @@ umic-seq-pacbio ngs_count \
   --umi_loc up \
   --left_ignore 22 \
   --right_ignore 24 \
+  --pear_min_overlap 20 \
   --output /path/to/pool_variant_counts.csv
 ```
 
@@ -198,6 +200,7 @@ Inputs:
 - `variants_dir`: per-consensus VCFs generated by the variant calling step
 - `probe`: probe FASTA (used only for logging; UMI extraction for Illumina uses your defined trimming rules)
 - `reference`: reference FASTA for amino acid mapping (fasta should be bases)
+- `--pear_min_overlap` (default: 20): Minimum overlap length for PEAR read merging. Lower values allow merging of reads with shorter overlaps.
 
 Outputs:
 - `pool_variant_counts.csv`: wide table, rows = VCF entries (CHROM, POS, REF, ALT), columns = pools

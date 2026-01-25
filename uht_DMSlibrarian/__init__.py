@@ -2,10 +2,10 @@
 uht-DMSlibrarian: UMIC-seq PacBio Pipeline
 A complete pipeline for processing PacBio data from raw FASTQ to detailed mutation analysis.
 
-Version: 0.1.5
+Version: 0.1.6
 """
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 __author__ = "Paul Jannis Zurek, pjz26@cam.ac.uk"
 
 # Note: We don't import modules here that have __main__ blocks

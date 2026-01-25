@@ -44,6 +44,116 @@ metrics_history = {
     'fitness': {'time': [], 'variants_processed': []}
 }
 
+CUSTOM_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;600&family=IBM+Plex+Serif:wght@400;600&display=swap');
+:root {
+  --bg: #f5ede4;
+  --card: #ffffff;
+  --ink: #1f2a27;
+  --muted: #7a8a86;
+  --accent: #2f6f64;
+  --accent-2: #c28c3a;
+  --border: #e2d9cf;
+}
+body, .gradio-container {
+  background: radial-gradient(circle at 15% 15%, #fdf7ef 0%, #f4ebe1 42%, #efe3d6 100%);
+  color: var(--muted);
+  font-family: 'IBM Plex Sans', 'Trebuchet MS', 'Verdana', sans-serif;
+}
+.gr-tabs, .gr-tab-nav, .gr-tab-nav > div {
+  background: rgba(255, 253, 250, 0.95) !important;
+  border-radius: 12px;
+  padding: 4px;
+}
+.gr-tab-nav button,
+.gr-tabitem > button,
+.gr-tabs button {
+  background: #fffdfa !important;
+  border: 1px solid var(--border) !important;
+  color: var(--ink) !important;
+}
+.gr-tab-nav button span,
+.gr-tabitem > button span,
+.gr-tabs button span {
+  color: var(--ink) !important;
+}
+.gr-tab-nav button[aria-selected="false"],
+.gr-tabitem > button[aria-selected="false"],
+.gr-tabs button[aria-selected="false"],
+.gr-tab-nav button:not(.selected),
+.gr-tabitem > button:not(.selected),
+.gr-tabs button:not(.selected) {
+  background: #fffdfa !important;
+  color: var(--ink) !important;
+}
+div[role="tablist"] button,
+div[role="tablist"] button span,
+button[role="tab"],
+button[role="tab"] span {
+  background: #fffdfa !important;
+  color: var(--ink) !important;
+  border: 1px solid var(--border) !important;
+}
+div[role="tablist"] button[aria-selected="false"],
+button[role="tab"][aria-selected="false"] {
+  background: #fffdfa !important;
+  color: var(--ink) !important;
+}
+h1, h2, h3 {
+  font-family: 'IBM Plex Serif', 'Georgia', serif;
+  letter-spacing: 0.2px;
+}
+.dark-text {
+  color: var(--ink) !important;
+}
+.light-text {
+  color: var(--muted) !important;
+}
+.section-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 8px 24px rgba(31, 42, 39, 0.08);
+}
+.gr-panel, .gr-box, .gr-accordion, .gr-form, .gr-file, .gr-input {
+  background: var(--card) !important;
+  border-color: var(--border) !important;
+}
+.gr-textbox textarea, .gr-textbox input, .gr-number input, .gr-dropdown input,
+.gr-file, .gr-file input, .gr-file label {
+  background: #fffdfa !important;
+  color: var(--ink) !important;
+  border-color: var(--border) !important;
+}
+.gr-label, .gr-input-label, .gr-form, .gr-text, .gr-textbox, .gr-number, .gr-dropdown,
+.gr-accordion .label, .gr-markdown, .prose, label {
+  color: var(--muted) !important;
+}
+.gr-tabs button, .gr-tab-nav button, .gr-tabitem > button {
+  color: var(--ink) !important;
+  font-weight: 600;
+  background: rgba(255, 253, 250, 0.9) !important;
+  border-color: var(--border) !important;
+}
+.gr-tabs button span, .gr-tab-nav button span, .gr-tabitem > button span {
+  color: var(--ink) !important;
+}
+.gr-tabitem:not(.selected) > button, .gr-tabs button:not(.selected), .gr-tab-nav button:not(.selected) {
+  color: var(--ink) !important;
+  background: rgba(255, 253, 250, 0.9) !important;
+}
+button.primary, .gr-button-primary {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #ffffff !important;
+}
+button.secondary, .gr-button-secondary {
+  background: #e7ede9 !important;
+  color: var(--ink) !important;
+}
+"""
+
 
 def create_metrics_plot(metrics_type: str = 'pipeline'):
     """Create a real-time metrics plot."""
@@ -69,8 +179,8 @@ def create_metrics_plot(metrics_type: str = 'pipeline'):
 
 def run_pipeline_with_progress(
     input_fastq, probe_file, reference_file, output_dir,
-    umi_len, umi_loc, min_probe_score, clustering_method,
-    identity, aln_thresh, size_thresh, max_reads, max_workers, report_file,
+    umi_len, umi_loc, min_probe_score,
+    identity, size_thresh, max_reads, max_seq_len, max_workers, report_file,
     progress=gr.Progress()
 ):
     """Run pipeline with progress tracking."""
@@ -83,6 +193,12 @@ def run_pipeline_with_progress(
         # Validate inputs
         if not all([input_path, probe_path, reference_path, output_dir]):
             return "Error: All required fields must be filled", None, None, create_metrics_plot('pipeline')
+        if not os.path.exists(input_path):
+            return f"Error: FASTQ file not found: {input_path}", None, None, create_metrics_plot('pipeline')
+        if not os.path.exists(probe_path):
+            return f"Error: Probe FASTA not found: {probe_path}", None, None, create_metrics_plot('pipeline')
+        if not os.path.exists(reference_path):
+            return f"Error: Reference FASTA not found: {reference_path}", None, None, create_metrics_plot('pipeline')
         
         # Create args namespace
         args = argparse.Namespace(
@@ -93,12 +209,12 @@ def run_pipeline_with_progress(
             umi_len=int(umi_len) if umi_len else 52,
             umi_loc=umi_loc if umi_loc else 'up',
             min_probe_score=int(min_probe_score) if min_probe_score else 15,
-            fast=(clustering_method == 'fast'),
-            slow=(clustering_method == 'slow'),
+            fast=True,
+            slow=False,
             identity=float(identity) if identity else 0.90,
-            aln_thresh=float(aln_thresh) if aln_thresh else 0.47,
             size_thresh=int(size_thresh) if size_thresh else 10,
             max_reads=int(max_reads) if max_reads else 20,
+            max_seq_len=int(max_seq_len) if max_seq_len else 15000,
             max_workers=int(max_workers) if max_workers else 4,
             report=report_file if report_file else None
         )
@@ -199,14 +315,14 @@ def run_fitness_with_progress(
         csv_path = fitness_input_csv.name if hasattr(fitness_input_csv, 'name') else fitness_input_csv
         
         if not all([csv_path, fitness_output_dir, input_pools, output_pools]):
-            return "❌ Error: All required fields must be filled", None, None, create_metrics_plot('fitness')
+            return "Error: All required fields must be filled", None, None, create_metrics_plot('fitness')
         
         # Parse pool lists
         input_pool_list = [p.strip() for p in input_pools.split() if p.strip()]
         output_pool_list = [p.strip() for p in output_pools.split() if p.strip()]
         
         if len(input_pool_list) != len(output_pool_list):
-            return "❌ Error: Number of input pools must match output pools", None, None, create_metrics_plot('fitness')
+            return "Error: Number of input pools must match output pools", None, None, create_metrics_plot('fitness')
         
         output_capture = io.StringIO()
         with redirect_stdout(output_capture), redirect_stderr(output_capture):
@@ -301,40 +417,47 @@ def auto_populate_fitness_from_ngs(ngs_output_file):
 
 def create_interface():
     """Create the main Gradio interface."""
-    with gr.Blocks(title="uht-DMSlibrarian Pipeline GUI", theme=gr.themes.Soft()) as app:
+    with gr.Blocks(title="uht-DMSlibrarian Pipeline GUI", theme=gr.themes.Soft(), css=CUSTOM_CSS) as app:
         gr.Markdown(
             """
-            # 🧬 uht-DMSlibrarian Pipeline GUI
+            # <span class="dark-text">uht-DMSlibrarian Pipeline GUI</span>
             
-            Complete pipeline for UMIC-seq PacBio data processing, NGS pool counting, and fitness analysis.
+            <span class="dark-text">Complete pipeline for UMIC-seq PacBio data processing, NGS pool counting, and fitness analysis.</span>
             
-            **Workflow**: Run Pipeline → NGS Count → Fitness Analysis (in that order)
+            <span class="dark-text">Workflow: Run Dictionary → NGS Count → Fitness Analysis</span>
+            
+            <span class="dark-text">Quick checklist</span>
+            - <span class="dark-text">Keep all inputs in a single project folder.</span>
+            - <span class="dark-text">Use the same probe and reference files throughout.</span>
+            - <span class="dark-text">Start with defaults, then adjust only if you understand the effect.</span>
             """
         )
         
         with gr.Tabs() as tabs:
-            # Pipeline Tab
-            with gr.Tab("Pipeline"):
-                gr.Markdown("##Complete Pipeline\nRun the full UMIC-seq PacBio pipeline from raw reads to variant analysis.")
+            # Dictionary Tab
+            with gr.Tab("Dictionary"):
+                gr.Markdown("## <span class=\"dark-text\">Complete Pipeline</span>\n<span class=\"dark-text\">Run the full UMIC-seq PacBio pipeline from raw reads to variant analysis.</span>")
                 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        pipeline_input_fastq = gr.File(
-                            label="Input FASTQ File * (Raw PacBio reads, can be .gz compressed)"
-                        )
-                        pipeline_probe_file = gr.File(
-                            label="Probe FASTA File * (Probe sequence ~50bp adjacent to UMI)",
-                            file_types=[".fasta", ".fa"]
-                        )
-                        pipeline_reference_file = gr.File(
-                            label="Reference FASTA File * (Reference gene sequence for variant calling)",
-                            file_types=[".fasta", ".fa"]
-                        )
-                        pipeline_output_dir = gr.Textbox(
-                            label="Output Directory *",
-                            placeholder="/path/to/output",
-                            info="Directory where all results will be written"
-                        )
+                with gr.Group(elem_classes="section-card"):
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            pipeline_input_fastq = gr.File(
+                                label="Input FASTQ File * (Raw PacBio reads, can be .gz compressed)",
+                                file_types=[".fastq", ".fq", ".fastq.gz", ".fq.gz"]
+                            )
+                            pipeline_probe_file = gr.File(
+                                label="Probe FASTA File * (Probe sequence ~50bp adjacent to UMI)",
+                                file_types=[".fasta", ".fa"]
+                            )
+                            pipeline_reference_file = gr.File(
+                                label="Reference FASTA File * (For multiple templates, include multiple FASTA entries)",
+                                file_types=[".fasta", ".fa"]
+                            )
+                            pipeline_output_dir = gr.Textbox(
+                                label="Output Directory *",
+                                placeholder="/path/to/output",
+                                info="Directory where all results will be written"
+                            )
                 
                 with gr.Accordion("UMI Extraction Parameters", open=False):
                     with gr.Row():
@@ -357,17 +480,11 @@ def create_interface():
                             value=15,
                             minimum=0,
                             precision=0,
-                            info="Minimum alignment score for probe matching. Perfect match = probe length."
+                            info="Recommended: ~90% of probe length (e.g., 45 for a 50bp probe). Perfect match = probe length."
                         )
                 
                 with gr.Accordion("Clustering Parameters", open=False):
                     with gr.Row():
-                        pipeline_clustering_method = gr.Radio(
-                            label="Clustering Method",
-                            choices=["fast", "slow"],
-                            value="fast",
-                            info="Fast uses CD-HIT (recommended, 1000x faster), Slow uses alignment-based clustering"
-                        )
                         pipeline_identity = gr.Slider(
                             label="Identity Threshold (Fast)",
                             minimum=0.5,
@@ -375,15 +492,6 @@ def create_interface():
                             value=0.90,
                             step=0.01,
                             info="Sequence identity for fast clustering (0.90 = 90% identity, allows ~10% mismatch)"
-                        )
-                        pipeline_aln_thresh = gr.Slider(
-                            label="Alignment Threshold (Slow)",
-                            minimum=0.1,
-                            maximum=1.0,
-                            value=0.47,
-                            step=0.01,
-                            visible=False,
-                            info="Alignment score threshold for slow clustering (legacy method)"
                         )
                         pipeline_size_thresh = gr.Number(
                             label="Size Threshold",
@@ -402,6 +510,13 @@ def create_interface():
                             precision=0,
                             info="Maximum reads used for consensus generation. More reads = better quality but slower"
                         )
+                        pipeline_max_seq_len = gr.Number(
+                            label="Max Sequence Length",
+                            value=15000,
+                            minimum=100,
+                            precision=0,
+                            info="Maximum read length used for consensus. Longer reads are skipped to avoid memory spikes"
+                        )
                         pipeline_max_workers = gr.Number(
                             label="Max Workers",
                             value=4,
@@ -417,23 +532,18 @@ def create_interface():
                         info="Generate a summary report with execution statistics"
                     )
                 
-                pipeline_clustering_method.change(
-                    fn=lambda m: gr.update(visible=(m == "slow")),
-                    inputs=pipeline_clustering_method,
-                    outputs=pipeline_aln_thresh
-                )
-                
                 pipeline_run_btn = gr.Button("Run Pipeline", variant="primary", size="lg")
                 
-                with gr.Row():
-                    pipeline_progress_text = gr.Textbox(
-                        label="Progress",
-                        lines=10,
-                        max_lines=20,
-                        interactive=False,
-                        container=True
-                    )
-                    pipeline_metrics_plot = gr.Plot(label="Real-time Metrics")
+                with gr.Group(elem_classes="section-card"):
+                    with gr.Row():
+                        pipeline_progress_text = gr.Textbox(
+                            label="Progress",
+                            lines=10,
+                            max_lines=20,
+                            interactive=False,
+                            container=True
+                        )
+                        pipeline_metrics_plot = gr.Plot(label="Real-time Metrics")
                 
                 pipeline_status = gr.Textbox(label="Status", interactive=False)
                 pipeline_output_files = gr.File(label="Output Files", file_count="multiple")
@@ -444,9 +554,9 @@ def create_interface():
                         pipeline_input_fastq, pipeline_probe_file,
                         pipeline_reference_file, pipeline_output_dir,
                         pipeline_umi_len, pipeline_umi_loc,
-                        pipeline_min_probe_score, pipeline_clustering_method,
-                        pipeline_identity, pipeline_aln_thresh,
-                        pipeline_size_thresh, pipeline_max_reads,
+                        pipeline_min_probe_score,
+                        pipeline_identity, pipeline_size_thresh, pipeline_max_reads,
+                        pipeline_max_seq_len,
                         pipeline_max_workers, pipeline_report_file
                     ],
                     outputs=[
@@ -457,38 +567,39 @@ def create_interface():
             
             # NGS Count Tab
             with gr.Tab("NGS Count"):
-                gr.Markdown("## NGS Pool Counting\nCount Illumina reads per variant via UMI matching to consensus sequences.")
+                gr.Markdown("## <span class=\"dark-text\">NGS Pool Counting</span>\n<span class=\"dark-text\">Count Illumina reads per variant via UMI matching to consensus sequences.</span>")
                 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        ngs_pools_dir = gr.Textbox(
-                            label="Pools Directory *",
-                            placeholder="/path/to/NGS_data",
-                            info="Directory containing per-pool folders with R1/R2 FASTQ files"
-                        )
-                        ngs_consensus_dir = gr.Textbox(
-                            label="Consensus Directory *",
-                            placeholder="/path/to/consensus",
-                            info="Consensus sequences directory (from Pipeline step)"
-                        )
-                        ngs_variants_dir = gr.Textbox(
-                            label="Variants Directory *",
-                            placeholder="/path/to/variants",
-                            info="Variants directory with per-consensus VCFs (from Pipeline step)"
-                        )
-                        ngs_probe_file = gr.File(
-                            label="Probe FASTA File * (Same probe file used for Pipeline UMI extraction)",
-                            file_types=[".fasta", ".fa"]
-                        )
-                        ngs_reference_file = gr.File(
-                            label="Reference FASTA File * (Reference sequence for amino acid mapping)",
-                            file_types=[".fasta", ".fa"]
-                        )
-                        ngs_output = gr.Textbox(
-                            label="Output CSV File *",
-                            placeholder="/path/to/pool_variant_counts.csv",
-                            info="Output file for pool variant counts"
-                        )
+                with gr.Group(elem_classes="section-card"):
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            ngs_pools_dir = gr.Textbox(
+                                label="Pools Directory *",
+                                placeholder="/path/to/NGS_data",
+                                info="Directory containing per-pool folders with R1/R2 FASTQ files"
+                            )
+                            ngs_consensus_dir = gr.Textbox(
+                                label="Consensus Directory *",
+                                placeholder="/path/to/consensus",
+                                info="Consensus sequences directory (from Pipeline step)"
+                            )
+                            ngs_variants_dir = gr.Textbox(
+                                label="Variants Directory *",
+                                placeholder="/path/to/variants",
+                                info="Variants directory with per-consensus VCFs (from Pipeline step)"
+                            )
+                            ngs_probe_file = gr.File(
+                                label="Probe FASTA File * (Same probe file used for Pipeline UMI extraction)",
+                                file_types=[".fasta", ".fa"]
+                            )
+                            ngs_reference_file = gr.File(
+                                label="Reference FASTA File * (Reference sequence for amino acid mapping)",
+                                file_types=[".fasta", ".fa"]
+                            )
+                            ngs_output = gr.Textbox(
+                                label="Output CSV File *",
+                                placeholder="/path/to/pool_variant_counts.csv",
+                                info="Output file for pool variant counts"
+                            )
                 
                 with gr.Accordion("UMI Parameters", open=False):
                     with gr.Row():
@@ -527,14 +638,15 @@ def create_interface():
                 ngs_auto_populate_btn = gr.Button("Auto-populate from Pipeline", variant="secondary")
                 ngs_run_btn = gr.Button("Run NGS Counting", variant="primary", size="lg")
                 
-                with gr.Row():
-                    ngs_progress_text = gr.Textbox(
-                        label="Progress",
-                        lines=10,
-                        max_lines=20,
-                        interactive=False
-                    )
-                    ngs_metrics_plot = gr.Plot(label="Real-time Metrics")
+                with gr.Group(elem_classes="section-card"):
+                    with gr.Row():
+                        ngs_progress_text = gr.Textbox(
+                            label="Progress",
+                            lines=10,
+                            max_lines=20,
+                            interactive=False
+                        )
+                        ngs_metrics_plot = gr.Plot(label="Real-time Metrics")
                 
                 ngs_status = gr.Textbox(label="Status", interactive=False)
                 ngs_output_files = gr.File(label="Output Files", file_count="multiple")
@@ -566,19 +678,20 @@ def create_interface():
             
             # Fitness Analysis Tab
             with gr.Tab("Fitness Analysis"):
-                gr.Markdown("## Fitness Analysis\nCalculate fitness from input/output pool comparisons with comprehensive visualizations.")
+                gr.Markdown("## <span class=\"dark-text\">Fitness Analysis</span>\n<span class=\"dark-text\">Calculate fitness from input/output pool comparisons with comprehensive visualizations.</span>")
                 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        fitness_input_csv = gr.File(
-                            label="Input CSV File * (merged_on_nonsyn_counts.csv from NGS Count step)",
-                            file_types=[".csv"]
-                        )
-                        fitness_output_dir = gr.Textbox(
-                            label="Output Directory *",
-                            placeholder="/path/to/fitness_results",
-                            info="Directory to save plots and processed data"
-                        )
+                with gr.Group(elem_classes="section-card"):
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            fitness_input_csv = gr.File(
+                                label="Input CSV File * (merged_on_nonsyn_counts.csv from NGS Count step)",
+                                file_types=[".csv"]
+                            )
+                            fitness_output_dir = gr.Textbox(
+                                label="Output Directory *",
+                                placeholder="/path/to/fitness_results",
+                                info="Directory to save plots and processed data"
+                            )
                 
                 with gr.Accordion("Pool Configuration", open=True):
                     gr.Markdown("**Input/Output Pool Pairs**: Enter pool names that represent input and output conditions.")
@@ -613,14 +726,15 @@ def create_interface():
                 fitness_auto_populate_btn = gr.Button("Auto-populate from NGS Count", variant="secondary")
                 fitness_run_btn = gr.Button("Run Fitness Analysis", variant="primary", size="lg")
                 
-                with gr.Row():
-                    fitness_progress_text = gr.Textbox(
-                        label="Progress",
-                        lines=10,
-                        max_lines=20,
-                        interactive=False
-                    )
-                    fitness_metrics_plot = gr.Plot(label="Real-time Metrics")
+                with gr.Group(elem_classes="section-card"):
+                    with gr.Row():
+                        fitness_progress_text = gr.Textbox(
+                            label="Progress",
+                            lines=10,
+                            max_lines=20,
+                            interactive=False
+                        )
+                        fitness_metrics_plot = gr.Plot(label="Real-time Metrics")
                 
                 fitness_status = gr.Textbox(label="Status", interactive=False)
                 fitness_output_files = gr.File(label="Output Files", file_count="multiple")
