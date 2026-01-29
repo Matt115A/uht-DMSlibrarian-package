@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uht-dmslibrarian"
-version = "0.2.2"
+version = "0.2.3"
 description = "Extension of the UMIC-seq Pipeline - Complete pipeline for dictionary building and NGS count inetgration, with fitness calculations, error modelling and mutation analysis"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"

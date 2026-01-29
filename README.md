@@ -74,6 +74,7 @@ Please install both of these and ensure they are in the PATH of your environment
 
 **Performance:**
 - `--max_workers` (default: 4): Number of parallel workers for consensus generation and variant calling. Increase for faster processing if you have more CPU cores available.
+- `--memory_monitor`: Enable memory monitoring during consensus generation and variant calling. When enabled, the pipeline will dynamically adjust worker count and batch sizes based on system memory pressure, pause when memory is critically high, and display memory usage in progress output. Requires `psutil` package (`pip install psutil`). Disabled by default.
 
 **Reporting:**
 - `--report` (optional): Path to output report file. If provided, generates a comprehensive summary report including execution time, input parameters, pipeline statistics (UMIs extracted, clusters generated, consensus sequences, variants called), and output file locations. Should be a .txt file, not a directory.

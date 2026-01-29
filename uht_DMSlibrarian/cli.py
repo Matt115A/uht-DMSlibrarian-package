@@ -114,12 +114,13 @@ def run_clustering(args):
 
 
 def run_consensus_generation(args):
-    """Run consensus generation step with memory safety mechanisms."""
+    """Run consensus generation step with optional memory safety mechanisms."""
     cluster_files_dir = args.input_dir
     output_dir = args.output_dir
     max_reads = args.max_reads
     max_workers = args.max_workers
     max_seq_len = args.max_seq_len
+    memory_monitor = getattr(args, 'memory_monitor', False)
 
     # Import memory monitoring functions from simple_consensus_pipeline
     from . import simple_consensus_pipeline
@@ -132,22 +133,27 @@ def run_consensus_generation(args):
         ConsensusErrorLogger
     )
 
-    print(f"Starting simple consensus pipeline with memory safety...")
+    # Only enable memory monitoring if flag is set AND psutil is available
+    use_memory_monitor = memory_monitor and PSUTIL_AVAILABLE
+
+    print(f"Starting simple consensus pipeline...")
     print(f"Cluster files directory: {cluster_files_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Max reads per consensus: {max_reads}")
     print(f"Max workers: {max_workers}")
     print(f"Max sequence length: {max_seq_len}")
 
-    # Check if psutil is available for memory monitoring
-    if PSUTIL_AVAILABLE:
+    # Check if memory monitoring is enabled
+    if use_memory_monitor:
         avail_mem = get_available_memory_gb()
         mem_percent = get_memory_percent()
         print(f"Memory monitoring: ENABLED")
         print(f"Available memory: {avail_mem:.1f} GB ({100-mem_percent:.1f}% free)")
-    else:
-        print(f"Memory monitoring: DISABLED (install psutil for better safety)")
+    elif memory_monitor and not PSUTIL_AVAILABLE:
+        print(f"Memory monitoring: REQUESTED but psutil not installed")
         print(f"  Install with: pip install psutil")
+    else:
+        print(f"Memory monitoring: DISABLED (use --memory_monitor to enable)")
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -196,7 +202,7 @@ def run_consensus_generation(args):
 
     def get_adaptive_workers():
         """Dynamically adjust worker count based on memory pressure."""
-        if not PSUTIL_AVAILABLE:
+        if not use_memory_monitor:
             return max_workers
 
         mem_percent = get_memory_percent()
@@ -234,7 +240,7 @@ def run_consensus_generation(args):
 
             # Memory status
             mem_str = ""
-            if PSUTIL_AVAILABLE:
+            if use_memory_monitor:
                 mem_percent = get_memory_percent()
                 if mem_percent is not None:
                     mem_str = f" | Mem: {mem_percent:.0f}%"
@@ -259,7 +265,7 @@ def run_consensus_generation(args):
         batch_num += 1
 
         # Check memory before starting a new batch
-        if PSUTIL_AVAILABLE and check_memory_pressure(MEMORY_CRITICAL_THRESHOLD):
+        if use_memory_monitor and check_memory_pressure(MEMORY_CRITICAL_THRESHOLD):
             print(f"\n[WARNING] High memory usage detected ({get_memory_percent():.0f}%)! "
                   f"Pausing for memory relief...", flush=True)
             memory_warnings += 1
@@ -273,7 +279,7 @@ def run_consensus_generation(args):
                       f"Continuing with reduced workers...", flush=True)
 
         # Adaptive batch size based on memory
-        if PSUTIL_AVAILABLE:
+        if use_memory_monitor:
             mem_percent = get_memory_percent()
             if mem_percent and mem_percent > MEMORY_WARNING_THRESHOLD:
                 current_batch_size = max(100, BASE_BATCH_SIZE // 2)
@@ -341,7 +347,7 @@ def run_consensus_generation(args):
         gc.collect()
 
         # Small pause between batches to allow system to stabilize
-        if PSUTIL_AVAILABLE and check_memory_pressure(MEMORY_WARNING_THRESHOLD):
+        if use_memory_monitor and check_memory_pressure(MEMORY_WARNING_THRESHOLD):
             time.sleep(1)  # Brief pause under memory pressure
 
     # Write error summary to log file
@@ -371,7 +377,7 @@ def run_consensus_generation(args):
 
 def run_variant_calling(args, ref_manager=None):
     """
-    Run variant calling step with memory safety mechanisms.
+    Run variant calling step with optional memory safety mechanisms.
 
     Args:
         args: Namespace with input_dir, reference, output_dir, combined_vcf, max_workers
@@ -383,6 +389,7 @@ def run_variant_calling(args, ref_manager=None):
     output_dir = args.output_dir
     combined_vcf = args.combined_vcf
     max_workers = args.max_workers
+    memory_monitor = getattr(args, 'memory_monitor', False)
 
     # Import memory monitoring functions
     from .simple_consensus_pipeline import (
@@ -394,8 +401,11 @@ def run_variant_calling(args, ref_manager=None):
     )
     import gc
 
+    # Only enable memory monitoring if flag is set AND psutil is available
+    use_memory_monitor = memory_monitor and PSUTIL_AVAILABLE
+
     print(f"\n{'='*60}")
-    print(f"RUNNING: Variant Calling (with memory safety)")
+    print(f"RUNNING: Variant Calling")
     print(f"{'='*60}")
 
     start_time = time.time()
@@ -416,10 +426,13 @@ def run_variant_calling(args, ref_manager=None):
     print(f"Combined VCF: {combined_vcf}")
 
     # Memory status
-    if PSUTIL_AVAILABLE:
+    if use_memory_monitor:
         avail_mem = get_available_memory_gb()
         mem_percent = get_memory_percent()
+        print(f"Memory monitoring: ENABLED")
         print(f"Memory: {avail_mem:.1f} GB available ({100-mem_percent:.1f}% free)")
+    else:
+        print(f"Memory monitoring: DISABLED")
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -450,7 +463,7 @@ def run_variant_calling(args, ref_manager=None):
 
     def get_adaptive_workers():
         """Dynamically adjust worker count based on memory pressure."""
-        if not PSUTIL_AVAILABLE:
+        if not use_memory_monitor:
             return max_workers
         mem_percent = get_memory_percent()
         if mem_percent is None:
@@ -494,7 +507,7 @@ def run_variant_calling(args, ref_manager=None):
 
             # Memory status
             mem_str = ""
-            if PSUTIL_AVAILABLE:
+            if use_memory_monitor:
                 mp = get_memory_percent()
                 if mp is not None:
                     mem_str = f" | Mem: {mp:.0f}%"
@@ -523,14 +536,14 @@ def run_variant_calling(args, ref_manager=None):
     processed_total = 0
     while processed_total < total_consensus:
         # Check memory before batch
-        if PSUTIL_AVAILABLE and check_memory_pressure(MEMORY_CRITICAL_THRESHOLD):
+        if use_memory_monitor and check_memory_pressure(MEMORY_CRITICAL_THRESHOLD):
             print(f"\n[WARNING] High memory ({get_memory_percent():.0f}%)! Pausing...", flush=True)
             memory_warnings += 1
             gc.collect()
             wait_for_memory_relief(MEMORY_RELIEF_THRESHOLD, timeout=120, check_interval=5)
 
         # Adaptive batch size
-        if PSUTIL_AVAILABLE:
+        if use_memory_monitor:
             mem_percent = get_memory_percent()
             if mem_percent and mem_percent > MEMORY_WARNING_THRESHOLD:
                 current_batch_size = max(100, BASE_BATCH_SIZE // 2)
@@ -891,7 +904,8 @@ def run_full_pipeline(args):
         output_dir=consensus_dir,
         max_reads=args.max_reads,
         max_workers=args.max_workers,
-        max_seq_len=args.max_seq_len
+        max_seq_len=args.max_seq_len,
+        memory_monitor=getattr(args, 'memory_monitor', False)
     )
     
     if not run_consensus_generation(consensus_args):
@@ -915,7 +929,8 @@ def run_full_pipeline(args):
         reference=args.reference,
         output_dir=variant_dir,
         combined_vcf=combined_vcf,
-        max_workers=args.max_workers
+        max_workers=args.max_workers,
+        memory_monitor=getattr(args, 'memory_monitor', False)
     )
 
     # Pass ReferenceManager for multi-reference support
@@ -1022,6 +1037,7 @@ Examples:
     all_parser.add_argument('--umi_loc', type=str, default='up', choices=['up', 'down'], help='UMI location relative to probe (up or down, default: up)')
     all_parser.add_argument('--min_probe_score', type=int, default=15, help='Minimal alignment score of probe for processing (default: 15)')
     all_parser.add_argument('--report', help='Path to output report file. Generates a summary report with execution time, parameters, and statistics.')
+    all_parser.add_argument('--memory_monitor', action='store_true', help='Enable memory monitoring during consensus generation and variant calling (requires psutil)')
     
     # Individual step commands
     extract_parser = subparsers.add_parser('extract', help='Extract UMIs from raw reads')
@@ -1049,6 +1065,7 @@ Examples:
     consensus_parser.add_argument('--max_reads', type=int, default=20, help='Max reads per consensus (default: 20)')
     consensus_parser.add_argument('--max_seq_len', type=int, default=15000, help='Max sequence length for consensus (default: 15000)')
     consensus_parser.add_argument('--max_workers', type=int, default=4, help='Max parallel workers (default: 4)')
+    consensus_parser.add_argument('--memory_monitor', action='store_true', help='Enable memory monitoring (requires psutil)')
     
     variant_parser = subparsers.add_parser('variants', help='Call variants')
     variant_parser.add_argument('--input_dir', required=True, help='Input consensus directory')
@@ -1056,6 +1073,7 @@ Examples:
     variant_parser.add_argument('--output_dir', required=True, help='Output variant directory')
     variant_parser.add_argument('--combined_vcf', required=True, help='Combined VCF output file')
     variant_parser.add_argument('--max_workers', type=int, default=4, help='Max parallel workers (default: 4)')
+    variant_parser.add_argument('--memory_monitor', action='store_true', help='Enable memory monitoring (requires psutil)')
     
     analyze_parser = subparsers.add_parser('analyze', help='Analyze variants and generate detailed CSV')
     analyze_parser.add_argument('--input_vcf', required=True, help='Input combined VCF file')
