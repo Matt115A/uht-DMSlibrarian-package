@@ -108,24 +108,36 @@ def parse_vcf_combined_streaming(vcf_file):
             alt = parts[4]
             info = parts[7]
 
-            # Extract cluster name and reference ID from INFO field
+            # Extract cluster name, reference ID, and WT flag from INFO field
             cluster_name = None
             reference_id = None
+            is_wt = False
             for info_item in info.split(';'):
                 if info_item.startswith('CLUSTER='):
                     cluster_name = info_item.split('=')[1]
                 elif info_item.startswith('REFERENCE_ID='):
                     reference_id = info_item.split('=')[1]
+                elif info_item == 'WT=true':
+                    is_wt = True
 
             if cluster_name:
-                cluster_variants[cluster_name].append({
-                    'pos': pos,
-                    'ref': ref,
-                    'alt': alt
-                })
-                # Store reference ID for this cluster (should be same for all variants in cluster)
-                if reference_id and cluster_name not in cluster_reference_ids:
-                    cluster_reference_ids[cluster_name] = reference_id
+                # Handle WT marker entries (position 0, no actual variants)
+                if is_wt and pos == 0:
+                    # Register WT cluster with empty variant list
+                    if cluster_name not in cluster_variants:
+                        cluster_variants[cluster_name] = []
+                    if reference_id:
+                        cluster_reference_ids[cluster_name] = reference_id
+                else:
+                    # Normal variant entry
+                    cluster_variants[cluster_name].append({
+                        'pos': pos,
+                        'ref': ref,
+                        'alt': alt
+                    })
+                    # Store reference ID for this cluster (should be same for all variants in cluster)
+                    if reference_id and cluster_name not in cluster_reference_ids:
+                        cluster_reference_ids[cluster_name] = reference_id
 
             # Progress reporting
             processed += 1
@@ -169,7 +181,11 @@ def parse_vcf_combined_streaming(vcf_file):
 
                 print(progress_line, end='', flush=True)
 
-    print(f"\nParsed variants for {len(cluster_variants):,} clusters")
+    # Count WT clusters (those with empty variant list)
+    wt_count = sum(1 for variants in cluster_variants.values() if len(variants) == 0)
+    mutant_count = len(cluster_variants) - wt_count
+
+    print(f"\nParsed {len(cluster_variants):,} clusters ({mutant_count:,} with variants, {wt_count:,} WT)")
 
     # Report reference distribution if multi-reference
     unique_refs = set(cluster_reference_ids.values())
@@ -309,7 +325,7 @@ def vcf_to_csv_detailed(vcf_file, reference_fasta_or_manager, output_csv):
                 'name': cluster_name,
                 'reference_id': cluster_ref_id,
                 'consensus_sequence': consensus_dna,
-                'mutations': '+'.join(mutations_aa) if mutations_aa else '',
+                'mutations': '+'.join(mutations_aa) if mutations_aa else 'WT',
                 'hamming_distance': hamming_dist,
                 'premature_stop': premature_stop,
                 'indelsyn': indelsyn

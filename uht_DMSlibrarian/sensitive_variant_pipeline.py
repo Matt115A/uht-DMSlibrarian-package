@@ -336,6 +336,7 @@ def combine_vcf_files(vcf_dir, output_vcf):
                     # Read VCF file and extract variants and reference ID
                     reference_id = None
                     variants = []
+                    is_wt = False
 
                     with open(vcf_file, 'r') as infile:
                         for line in infile:
@@ -347,12 +348,13 @@ def combine_vcf_files(vcf_dir, output_vcf):
                             else:
                                 parts = line.strip().split('\t')
                                 if len(parts) >= 8:
-                                    # Skip WT marker entries (position 0)
+                                    # Check for WT marker entries (position 0)
                                     if parts[1] == '0' and parts[6] == 'WT':
                                         # Extract REFERENCE_ID from WT marker
                                         for info_item in parts[7].split(';'):
                                             if info_item.startswith('REFERENCE_ID='):
                                                 reference_id = info_item.split('=')[1]
+                                        is_wt = True
                                         continue
 
                                     # Add cluster information to INFO field
@@ -370,6 +372,12 @@ def combine_vcf_files(vcf_dir, output_vcf):
                     # Write variants to combined VCF
                     for variant in variants:
                         outfile.write(variant + '\n')
+
+                    # For WT clusters (no variants), write a WT marker entry
+                    # so the analysis stage knows about this cluster and its reference
+                    if not variants and is_wt and reference_id:
+                        wt_info = f"CLUSTER={cluster_name};REFERENCE_ID={reference_id};WT=true"
+                        outfile.write(f"{reference_id}\t0\t.\t.\t.\t.\tWT\t{wt_info}\n")
 
                 except Exception as e:
                     print(f"Error processing {vcf_file}: {e}")
