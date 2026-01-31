@@ -40,10 +40,15 @@ umic-seq-pacbio all \
 ```
 
 **External dependencies:**
-- `CD-HIT`
-- `Abpoa`
+- `CD-HIT` - UMI clustering
+- `Abpoa` - Consensus generation
+- `minimap2` - Sequence alignment for variant calling
+- `bcftools` - Variant calling (used internally)
 
-Please install both of these and ensure they are in the PATH of your environment. Use e.g. conda to install these. 
+Please install all of these and ensure they are in the PATH of your environment. Use e.g. conda to install these:
+```bash
+conda install -c bioconda cd-hit abpoa minimap2 bcftools
+``` 
 
 **Required Arguments:**
 - `--input`: Input FASTQ file (can be .gz compressed)
@@ -120,7 +125,7 @@ For single-reference experiments, the pipeline works as before with no changes r
 
 ### Individual Commands
 
-You can also run individual steps:
+You can also run individual steps. The `variants` and `analyze` commands fully support multi-reference FASTA files - each consensus will be automatically matched to its best-matching reference:
 
 ```bash
 # Extract UMIs

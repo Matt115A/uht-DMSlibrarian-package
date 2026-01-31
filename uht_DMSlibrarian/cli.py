@@ -1127,9 +1127,23 @@ Examples:
     elif args.command == 'consensus':
         success = run_consensus_generation(args)
     elif args.command == 'variants':
-        success = run_variant_calling(args)
+        # Load ReferenceManager for multi-reference support
+        print("\nLoading reference sequence(s)...")
+        ref_manager = ReferenceManager(args.reference)
+        print(ref_manager.get_reference_info())
+        if ref_manager.is_multi_reference():
+            print("Multi-reference mode enabled: consensus sequences will be matched to best reference")
+        print()
+        success = run_variant_calling(args, ref_manager=ref_manager)
     elif args.command == 'analyze':
-        success = run_analysis(args)
+        # Load ReferenceManager for multi-reference support
+        print("\nLoading reference sequence(s)...")
+        ref_manager = ReferenceManager(args.reference)
+        print(ref_manager.get_reference_info())
+        if ref_manager.is_multi_reference():
+            print("Multi-reference mode enabled: using reference-specific AA translations")
+        print()
+        success = run_analysis(args, ref_manager=ref_manager)
     elif args.command == 'ngs_count':
         print("=" * 60)
         print("NGS POOL COUNTING")
