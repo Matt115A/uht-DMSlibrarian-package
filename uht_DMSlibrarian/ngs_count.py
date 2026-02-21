@@ -60,6 +60,73 @@ def reverse_complement(seq: str) -> str:
     return seq.translate(comp)[::-1]
 
 
+def get_block_ranges(umi_len: int, max_mismatches: int) -> List[Tuple[int, int]]:
+    """Split UMI into (max_mismatches+1) blocks for candidate narrowing."""
+    if max_mismatches < 1:
+        return []
+    blocks = max_mismatches + 1
+    base = umi_len // blocks
+    rem = umi_len % blocks
+    ranges: List[Tuple[int, int]] = []
+    start = 0
+    for i in range(blocks):
+        size = base + (1 if i < rem else 0)
+        end = start + size
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def build_block_index(umi_list: List[str], block_ranges: List[Tuple[int, int]]) -> Dict[Tuple[int, str], List[int]]:
+    """Build block index for mismatch-tolerant matching."""
+    index: Dict[Tuple[int, str], List[int]] = {}
+    if not block_ranges:
+        return index
+    for idx, umi in enumerate(umi_list):
+        for block_id, (start, end) in enumerate(block_ranges):
+            key = (block_id, umi[start:end])
+            index.setdefault(key, []).append(idx)
+    return index
+
+
+def hamming_distance(a: str, b: str, max_mismatches: int) -> int:
+    """Hamming distance with early exit once max_mismatches exceeded."""
+    mismatches = 0
+    for x, y in zip(a, b):
+        if x != y:
+            mismatches += 1
+            if mismatches > max_mismatches:
+                return mismatches
+    return mismatches
+
+
+def find_umi_with_mismatches(query: str, umi_list: List[str],
+                             block_index: Dict[Tuple[int, str], List[int]],
+                             block_ranges: List[Tuple[int, int]],
+                             max_mismatches: int) -> Optional[int]:
+    """Return index of best matching UMI within max_mismatches or None."""
+    if not block_ranges:
+        return None
+    candidates = set()
+    for block_id, (start, end) in enumerate(block_ranges):
+        key = (block_id, query[start:end])
+        for idx in block_index.get(key, []):
+            candidates.add(idx)
+    if not candidates:
+        return None
+    best_idx = None
+    best_mismatches = max_mismatches + 1
+    for idx in candidates:
+        cand = umi_list[idx]
+        mismatches = hamming_distance(query, cand, max_mismatches)
+        if mismatches <= max_mismatches and mismatches < best_mismatches:
+            best_mismatches = mismatches
+            best_idx = idx
+            if best_mismatches == 0:
+                break
+    return best_idx
+
+
 def find_approx(query: str, target: str, max_mismatch: int) -> int:
     """Return start index of first occurrence of query in target allowing up to max_mismatch mismatches; -1 if not found."""
     q = query.upper()
@@ -462,7 +529,8 @@ def find_r1_r2_pairs(folder: str) -> List[Tuple[str, str]]:
 def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_fasta: str,
                   umi_len: int, umi_loc: str, output_csv: str, reference_fasta_or_manager,
                   left_ignore: int = 22, right_ignore: int = 24,
-                  pear_min_overlap: int = 20, pear_yolo: bool = False) -> bool:
+                  pear_min_overlap: int = 20, pear_yolo: bool = False,
+                  umi_mismatches: int = 0) -> bool:
     """
     Run NGS pool counting.
 
@@ -480,6 +548,7 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         right_ignore: Bases to ignore from end of assembled read
         pear_min_overlap: Minimum overlap length for PEAR read merging (default: 20)
         pear_yolo: If True, use maximally permissive PEAR settings (disables p-value test)
+        umi_mismatches: Maximum mismatches allowed in UMI matching (default: 0)
 
     Returns:
         True on success, False on failure
@@ -494,9 +563,27 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         consensus = load_consensus_fasta(consensus_dir)
         print(f"Loaded {len(consensus)} consensus sequences", flush=True)
 
+        if umi_mismatches < 0:
+            raise ValueError("umi_mismatches must be >= 0")
+        if umi_mismatches > 5:
+            raise ValueError("umi_mismatches must be <= 5")
+        if umi_mismatches >= umi_len:
+            raise ValueError("umi_mismatches must be less than umi_len")
+
         print("Building UMI index (circular, both strands)...", flush=True)
         umi_index = build_umi_index(consensus, umi_len)
         print(f"Index contains {len(umi_index)} unique UMIs", flush=True)
+        if umi_mismatches > 0:
+            print(f"UMI mismatch tolerance: {umi_mismatches}", flush=True)
+            umi_list = list(umi_index.keys())
+            cons_list = [umi_index[umi] for umi in umi_list]
+            block_ranges = get_block_ranges(umi_len, umi_mismatches)
+            block_index = build_block_index(umi_list, block_ranges)
+        else:
+            umi_list = []
+            cons_list = []
+            block_ranges = []
+            block_index = {}
 
         print("Collecting variant rows...", flush=True)
         var_rows, per_consensus = collect_all_variant_rows(variants_dir)
@@ -603,6 +690,10 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
                         continue
                     umi_extracted += 1
                     cons_name = umi_index.get(umi)
+                    if not cons_name and umi_mismatches > 0:
+                        idx = find_umi_with_mismatches(umi, umi_list, block_index, block_ranges, umi_mismatches)
+                        if idx is not None:
+                            cons_name = cons_list[idx]
                     if not cons_name:
                         continue
                     umi_matched += 1
@@ -627,6 +718,10 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
                         continue
                     umi_extracted += 1
                     cons_name = umi_index.get(umi)
+                    if not cons_name and umi_mismatches > 0:
+                        idx = find_umi_with_mismatches(umi, umi_list, block_index, block_ranges, umi_mismatches)
+                        if idx is not None:
+                            cons_name = cons_list[idx]
                     if not cons_name:
                         continue
                     umi_matched += 1
@@ -708,9 +803,10 @@ if __name__ == '__main__':
     ap.add_argument('--umi_len', type=int, required=True)
     ap.add_argument('--umi_loc', choices=['up','down'], required=True)
     ap.add_argument('--reference', required=True, help='Reference FASTA file for amino acid mapping')
+    ap.add_argument('--umi_mismatches', type=int, default=0, help='Max UMI mismatches allowed (default: 0)')
     ap.add_argument('--output', required=True)
     a = ap.parse_args()
-    ok = run_ngs_count(a.pools_dir, a.consensus_dir, a.variants_dir, a.probe, a.umi_len, a.umi_loc, a.output, a.reference)
+    ok = run_ngs_count(a.pools_dir, a.consensus_dir, a.variants_dir, a.probe, a.umi_len, a.umi_loc, a.output, a.reference,
+                       umi_mismatches=a.umi_mismatches)
     sys.exit(0 if ok else 1)
-
 

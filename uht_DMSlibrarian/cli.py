@@ -1089,6 +1089,7 @@ Examples:
     ngs_parser.add_argument('--reference', required=True, help='Reference FASTA file for amino acid mapping')
     ngs_parser.add_argument('--umi_len', type=int, default=52, help='UMI length (default: 52)')
     ngs_parser.add_argument('--umi_loc', type=str, default='up', choices=['up','down'], help='UMI location relative to probe (default: up)')
+    ngs_parser.add_argument('--umi_mismatches', type=int, default=0, help='Max UMI mismatches allowed (default: 0)')
     ngs_parser.add_argument('--output', required=True, help='Output counts CSV file')
     ngs_parser.add_argument('--left_ignore', type=int, default=22, help='Bases to ignore from start of assembled read (default: 22)')
     ngs_parser.add_argument('--right_ignore', type=int, default=24, help='Bases to ignore from end of assembled read (default: 24)')
@@ -1173,7 +1174,8 @@ Examples:
             args.left_ignore,
             args.right_ignore,
             pear_overlap,
-            args.pear_yolo
+            args.pear_yolo,
+            args.umi_mismatches
         )
     elif args.command == 'fitness':
         print("=" * 60)

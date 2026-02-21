@@ -258,7 +258,7 @@ def run_pipeline_with_progress(
 
 def run_ngs_with_progress(
     pools_dir, consensus_dir, variants_dir, ngs_probe_file, ngs_reference_file,
-    ngs_output, ngs_umi_len, ngs_umi_loc, left_ignore, right_ignore,
+    ngs_output, ngs_umi_len, ngs_umi_loc, ngs_umi_mismatches, left_ignore, right_ignore,
     progress=gr.Progress()
 ):
     """Run NGS counting with progress tracking."""
@@ -281,7 +281,8 @@ def run_ngs_with_progress(
                 ngs_output,
                 reference_path,
                 int(left_ignore) if left_ignore else 22,
-                int(right_ignore) if right_ignore else 24
+                int(right_ignore) if right_ignore else 24,
+                umi_mismatches=int(ngs_umi_mismatches) if ngs_umi_mismatches is not None else 0
             )
         
         output_text = output_capture.getvalue()
@@ -617,6 +618,14 @@ def create_interface():
                             value="up",
                             info="UMI location relative to probe (should match Pipeline setting)"
                         )
+                        ngs_umi_mismatches = gr.Number(
+                            label="UMI Mismatches",
+                            value=0,
+                            minimum=0,
+                            maximum=5,
+                            precision=0,
+                            info="Max mismatches allowed when matching UMI to consensus (default: 0)"
+                        )
                 
                 with gr.Accordion("Read Trimming Parameters", open=False):
                     with gr.Row():
@@ -667,7 +676,7 @@ def create_interface():
                         ngs_pools_dir, ngs_consensus_dir,
                         ngs_variants_dir, ngs_probe_file,
                         ngs_reference_file, ngs_output,
-                        ngs_umi_len, ngs_umi_loc,
+                        ngs_umi_len, ngs_umi_loc, ngs_umi_mismatches,
                         ngs_left_ignore, ngs_right_ignore
                     ],
                     outputs=[

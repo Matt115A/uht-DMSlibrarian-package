@@ -39,3 +39,5 @@ UMIclusterfull_*
 consensus_results/
 variant_results/
 
+# Sample data
+a_small_morsel/

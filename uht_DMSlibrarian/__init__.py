@@ -5,7 +5,7 @@ A complete pipeline for processing PacBio data from raw FASTQ to detailed mutati
 Version: 0.1.6
 """
 
-__version__ = "0.1.6"
+__version__ = "0.2.8"
 __author__ = "Paul Jannis Zurek, pjz26@cam.ac.uk"
 
 # Note: We don't import modules here that have __main__ blocks
@@ -20,4 +20,3 @@ __all__ = [
     'fitness_analysis',
     'reference_manager',
 ]
-
