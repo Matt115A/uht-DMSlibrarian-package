@@ -1105,6 +1105,19 @@ Examples:
     fitness_parser.add_argument('--min_input', type=int, default=10, help='Minimum count threshold in input pools (default: 10)')
     fitness_parser.add_argument('--aa_filter', type=str, default=None, help='Filter mutability plot to specific mutant amino acid (e.g., S for serine, P for proline, * for stop codons)')
     fitness_parser.add_argument('--group_by_reference', action='store_true', help='Generate separate plots per reference template (requires REFERENCE_ID column in input)')
+    fitness_parser.add_argument('--error_model', type=str, default='bootstrap', choices=['bootstrap', 'dimsum_analog', 'droplet_full'], help='Error model to use (default: bootstrap)')
+    fitness_parser.add_argument('--error_model_config', type=str, default=None, help='Path to YAML/JSON error model config file')
+    fitness_parser.add_argument('--fit_error_model', type=str, default=None, help='Whether to fit the selected error model (true/false)')
+    fitness_parser.add_argument('--error_model_bootstraps', type=int, default=None, help='Bootstrap iterations for error model uncertainty')
+    fitness_parser.add_argument('--single_rep_mode', type=str, default='fallback', choices=['fallback', 'fail', 'force'], help='Single-replicate behavior (default: fallback)')
+    fitness_parser.add_argument('--report_html', type=str, default='true', help='Generate self-contained HTML report (true/false)')
+    fitness_parser.add_argument('--report_html_path', type=str, default=None, help='Path to HTML report (default: output_dir/error_model_report.html)')
+    fitness_parser.add_argument('--random_seed', type=int, default=42, help='Random seed for fitting/bootstrapping (default: 42)')
+    fitness_parser.add_argument('--stage_metrics_json', type=str, default=None, help='Optional JSON file with upstream stage metrics')
+    fitness_parser.add_argument('--attribution_scale', type=str, default='both', choices=['variance', 'fraction', 'both'], help='Stage attribution scale in outputs (default: both)')
+    fitness_parser.add_argument('--shrinkage', type=str, default='none', choices=['none', 'normal_prior'], help='Optional fitness shrinkage mode (default: none)')
+    fitness_parser.add_argument('--shrinkage_prior_mean', type=float, default=0.0, help='Prior mean for shrinkage if mode is normal_prior (default: 0.0)')
+    fitness_parser.add_argument('--shrinkage_prior_var', type=float, default=1.0, help='Prior variance for shrinkage if mode is normal_prior (default: 1.0)')
     
     # GUI command
     gui_parser = subparsers.add_parser('gui', help='Launch interactive web-based GUI')
@@ -1188,7 +1201,20 @@ Examples:
             args.output_pools,
             args.min_input,
             args.aa_filter,
-            getattr(args, 'group_by_reference', False)
+            getattr(args, 'group_by_reference', False),
+            args.error_model,
+            args.error_model_config,
+            (args.fit_error_model.lower() == 'true') if isinstance(args.fit_error_model, str) else None,
+            args.error_model_bootstraps,
+            args.single_rep_mode,
+            (args.report_html.lower() == 'true') if isinstance(args.report_html, str) else True,
+            args.report_html_path,
+            args.random_seed,
+            args.stage_metrics_json,
+            args.attribution_scale,
+            args.shrinkage,
+            args.shrinkage_prior_mean,
+            args.shrinkage_prior_var,
         )
     elif args.command == 'gui':
         try:

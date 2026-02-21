@@ -10,7 +10,7 @@ readme_file = Path(__file__).parent / "README.md"
 long_description = readme_file.read_text() if readme_file.exists() else ""
 
 # Version
-__version__ = "0.2.8"
+__version__ = "0.2.9"
 
 setup(
     name="uht-dmslibrarian",
@@ -34,6 +34,7 @@ setup(
         "scikit-allel==1.3.13",
         "tqdm==4.67.1",
         "psutil==7.1.3",
+        "PyYAML>=6.0",
         "gradio>=4.0.0",
     ],
     entry_points={

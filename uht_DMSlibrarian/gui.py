@@ -308,7 +308,8 @@ def run_ngs_with_progress(
 
 def run_fitness_with_progress(
     fitness_input_csv, fitness_output_dir, input_pools, output_pools,
-    min_input, aa_filter,
+    min_input, aa_filter, error_model, error_model_config_file, fit_error_model,
+    error_model_bootstraps, single_rep_mode, report_html, report_html_path, random_seed,
     progress=gr.Progress()
 ):
     """Run fitness analysis with progress tracking."""
@@ -333,7 +334,20 @@ def run_fitness_with_progress(
                 input_pool_list,
                 output_pool_list,
                 int(min_input) if min_input else 10,
-                aa_filter if aa_filter else None
+                aa_filter if aa_filter else None,
+                False,
+                error_model if error_model else "bootstrap",
+                (
+                    error_model_config_file.name
+                    if hasattr(error_model_config_file, "name")
+                    else error_model_config_file
+                ) if error_model_config_file else None,
+                bool(fit_error_model),
+                int(error_model_bootstraps) if error_model_bootstraps else None,
+                single_rep_mode if single_rep_mode else "fallback",
+                bool(report_html),
+                report_html_path if report_html_path else None,
+                int(random_seed) if random_seed is not None else 42,
             )
         
         output_text = output_capture.getvalue()
@@ -731,6 +745,49 @@ def create_interface():
                             placeholder="S",
                             info="Filter mutability plot to specific amino acid (e.g., 'S' for serine, 'P' for proline, '*' for stop codons)"
                         )
+
+                with gr.Accordion("Error Model", open=False):
+                    with gr.Row():
+                        fitness_error_model = gr.Dropdown(
+                            label="Error Model",
+                            choices=["bootstrap", "dimsum_analog", "droplet_full"],
+                            value="bootstrap",
+                        )
+                        fitness_single_rep_mode = gr.Dropdown(
+                            label="Single Replicate Mode",
+                            choices=["fallback", "fail", "force"],
+                            value="fallback",
+                        )
+                    with gr.Row():
+                        fitness_fit_error_model = gr.Checkbox(
+                            label="Fit Error Model",
+                            value=True,
+                        )
+                        fitness_error_model_bootstraps = gr.Number(
+                            label="Model Bootstraps",
+                            value=200,
+                            minimum=1,
+                            precision=0,
+                        )
+                    with gr.Row():
+                        fitness_error_model_config = gr.File(
+                            label="Error Model Config (YAML/JSON)",
+                            file_types=[".yml", ".yaml", ".json"],
+                        )
+                    with gr.Row():
+                        fitness_report_html = gr.Checkbox(
+                            label="Generate HTML Report",
+                            value=True,
+                        )
+                        fitness_report_html_path = gr.Textbox(
+                            label="HTML Report Path (Optional)",
+                            placeholder="/path/to/error_model_report.html",
+                        )
+                    fitness_random_seed = gr.Number(
+                        label="Random Seed",
+                        value=42,
+                        precision=0,
+                    )
                 
                 fitness_auto_populate_btn = gr.Button("Auto-populate from NGS Count", variant="secondary")
                 fitness_run_btn = gr.Button("Run Fitness Analysis", variant="primary", size="lg")
@@ -761,7 +818,10 @@ def create_interface():
                     inputs=[
                         fitness_input_csv, fitness_output_dir,
                         fitness_input_pools, fitness_output_pools,
-                        fitness_min_input, fitness_aa_filter
+                        fitness_min_input, fitness_aa_filter,
+                        fitness_error_model, fitness_error_model_config, fitness_fit_error_model,
+                        fitness_error_model_bootstraps, fitness_single_rep_mode,
+                        fitness_report_html, fitness_report_html_path, fitness_random_seed
                     ],
                     outputs=[
                         fitness_status, fitness_progress_text,

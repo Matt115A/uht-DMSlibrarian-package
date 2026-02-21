@@ -2,4 +2,4 @@ include README.md
 include requirements.txt
 include LICENSE
 recursive-include uht_DMSlibrarian *.py
-
+recursive-include uht_DMSlibrarian/reporting *.png

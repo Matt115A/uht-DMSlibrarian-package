@@ -26,8 +26,9 @@ test_venv/
 .DS_Store
 
 # Test files
-test_*
-*_test*
+tests/__pycache__/
+tests/.DS_Store
+tests/data/
 *_temp*
 
 # Agent files

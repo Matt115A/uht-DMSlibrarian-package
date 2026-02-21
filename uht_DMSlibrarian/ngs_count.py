@@ -18,6 +18,7 @@ reference sequence for each cluster's AA translation.
 import os
 import sys
 import gzip
+import json
 from pathlib import Path
 from typing import Dict, List, Tuple, Iterable, Optional
 import traceback
@@ -618,6 +619,7 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
     # Haplotype rows (consensus-level, preserve multi-mutations)
     hap_rows, hap_index = collect_haplotype_rows(variants_dir, ref_seq_or_manager)
     hap_counts = [[0 for _ in pool_folders] for _ in range(len(hap_rows))]
+    metrics = {"pools": [], "global_read_count": 0, "global_umi_extracted": 0, "global_umi_matched": 0}
 
     for j, pool in enumerate(pool_folders):
         pool_name = pool_names[j]
@@ -739,6 +741,18 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
                 print(f"\n    Pair {pair_idx+1} summary: {read_count:,} reads, {umi_extracted:,} UMIs extracted, {umi_matched:,} matched")
 
         print(f"\n  Pool {pool_name} total: {pool_read_count:,} reads, {pool_umi_extracted:,} UMIs extracted, {pool_umi_matched:,} matched to consensus")
+        metrics["pools"].append(
+            {
+                "pool_name": pool_name,
+                "read_count": int(pool_read_count),
+                "umi_extracted": int(pool_umi_extracted),
+                "umi_matched": int(pool_umi_matched),
+                "match_rate": float(pool_umi_matched / pool_umi_extracted) if pool_umi_extracted > 0 else 0.0,
+            }
+        )
+        metrics["global_read_count"] += int(pool_read_count)
+        metrics["global_umi_extracted"] += int(pool_umi_extracted)
+        metrics["global_umi_matched"] += int(pool_umi_matched)
 
     print(f"\nWriting output to: {output_csv}")
     with open(output_csv, 'w') as out:
@@ -787,6 +801,16 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
             nuc_muts = ';'.join(sorted(entry['mutations'])) if entry['mutations'] else ''
             row = [ref_id, aa_muts, consensus_ids, nuc_muts] + [str(c) for c in entry['counts']]
             out.write(','.join(row) + '\n')
+
+    metrics["global_match_rate"] = (
+        float(metrics["global_umi_matched"] / metrics["global_umi_extracted"])
+        if metrics["global_umi_extracted"] > 0
+        else 0.0
+    )
+    metrics_path = str(Path(output_csv).parent / "ngs_count_metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"Writing ngs count metrics to: {metrics_path}")
     
     print("Done!")
     return True
@@ -809,4 +833,3 @@ if __name__ == '__main__':
     ok = run_ngs_count(a.pools_dir, a.consensus_dir, a.variants_dir, a.probe, a.umi_len, a.umi_loc, a.output, a.reference,
                        umi_mismatches=a.umi_mismatches)
     sys.exit(0 if ok else 1)
-

@@ -235,7 +235,8 @@ The fitness analysis module processes `merged_on_nonsyn_counts.csv` to calculate
 - Calculates relative frequencies (column normalization)
 - Computes log fitness ratios: `log(rel_output / rel_input)` for each input/output pair
 - Calculates average fitness across all pairs
-- Bootstrap confidence intervals for fitness estimates (when multiple replicates available)
+- Supports multiple error models for uncertainty (including mechanistic droplet-stage modeling)
+- Optional normal-prior shrinkage for fitness point estimates
 - Generates mutability, epistasis, fitness distribution, reproducibility, and substitution matrix plots
 
 **Usage:**
@@ -257,25 +258,53 @@ umic-seq-pacbio fitness \
 - `--min_input` (default: 10): Minimum count threshold in input pools; variants below this in any input are filtered out
 - `--aa_filter` (optional): Filter mutability plot to specific mutant amino acid (e.g., `S` for serine, `P` for proline, `*` for stop codons)
 - `--group_by_reference` (optional): Generate separate plots and analysis per reference template. Requires `REFERENCE_ID` column in input (created automatically when using multi-reference mode)
+- `--error_model` (default: `bootstrap`): Error model for uncertainty (`bootstrap`, `dimsum_analog`, `droplet_full`)
+  - `droplet_full` uses a mechanistic droplet-stage decomposition (library, prep/PCR, sorting, dictionary, sequencing, residual)
+- `--error_model_config` (optional): YAML/JSON file with model parameters
+- `--single_rep_mode` (default: `fallback`): Behavior for single input/output pair (`fallback`, `fail`, `force`)
+- `--report_html` (default: `true`): Generate a self-contained HTML model report
+- `--report_html_path` (optional): Custom path for HTML report file
+- `--stage_metrics_json` (optional): JSON file with upstream stage metrics (e.g. UMI match stats) for refined stage attribution
+- `--attribution_scale` (default: `both`): Output stage attribution as `variance`, `fraction`, or both
+- `--shrinkage` (default: `none`): Optional post-fit fitness correction (`none`, `normal_prior`)
+- `--shrinkage_prior_mean` (default: `0.0`): Prior mean used when shrinkage is enabled
+- `--shrinkage_prior_var` (default: `1.0`): Prior variance used when shrinkage is enabled
 
 **Outputs:**
-- `fitness_analysis_results.csv`: Processed data with fitness calculations, relative frequencies, mutation annotations, and bootstrap confidence intervals (if multiple replicates)
+- `fitness_analysis_results.csv`: Processed data with fitness calculations, relative frequencies, mutation annotations, uncertainty columns, and optional shrinkage columns
+- `error_model_report.html`: Detailed visual report of model fit, diagnostics, and per-variant uncertainty (if `--report_html true`)
+  - Includes model workflow, stage variance composition, stage glossary, identifiability diagnostics, and shrinkage visuals
+- `error_model_parameters.csv`: Fitted model parameter estimates
+- `error_model_diagnostics.json`: Model diagnostics and convergence metadata
+- `error_model_variant_metrics.csv`: Per-variant uncertainty metrics
+  - Includes `fitness_shrunk`, `fitness_shrinkage_delta`, `fitness_shrinkage_factor` when shrinkage is enabled
+- `error_model_stage_contributions_variant.csv`: Per-variant stage attribution (absolute variance and fractions)
+- `error_model_stage_contributions_global.csv`: Global stage attribution summary across all variants
+- `error_model_identifiability.json`: Boundaries and identifiability diagnostics from model fitting
 - `mutability_plot.png`: Average fitness at each position for Hamming 1 (single) mutants, relative to WT
 - `mutability_plot_{AA}.png`: Mutability plot filtered to specific amino acid (if `--aa_filter` used)
+- `mutability_plot_shrunk.png`: Same mutability plot computed from `fitness_shrunk` (when available)
+- `mutability_plot_{AA}_shrunk.png`: Amino-acid-filtered shrinkage mutability plot (when available)
 - `epistasis_plot.png`: Scatter plot of sum of single mutant fitnesses (x-axis) vs double mutant fitness (y-axis)
   - Only includes double mutants where both constituent singles are present in the dataset
   - Includes additivity line and correlation coefficient
+- `epistasis_plot_shrunk.png`: Same epistasis plot using shrinkage-corrected fitness (generated when shrinkage outputs are available)
 - `fitness_distributions.png`: Overlaid KDE plots for single mutants:
   - Stop codons
   - Proline mutations
   - All other mutations
+- `fitness_distributions_shrunk.png`: Same single-mutant KDEs using `fitness_shrunk` (when available)
 - `hamming_distributions.png`: Overlaid KDE plots for fitness distributions at Hamming distances 1-5
+- `hamming_distributions_shrunk.png`: Same Hamming KDEs using `fitness_shrunk` (when available)
 - `reproducibility_plot.png`: Pairwise comparison heatmaps of fitness across replicate pairs (only generated if ≥2 replicates)
   - Shows correlation between replicates with density heatmaps (blue→red color scheme)
+- `reproducibility_plot_shrunk.png`: Shrinkage-adjusted replicate comparison heatmaps (when available)
 - `substitution_matrix.png`: Heatmap showing average fitness for each amino acid substitution type (21×21 matrix including stop codons)
   - Amino acids arranged by similarity (hydrophobic, polar, charged, etc.)
   - Red = beneficial, Blue = deleterious
 - `substitution_matrix.csv`: Full substitution matrix data for further analysis
+- `substitution_matrix_shrunk.png`: Substitution matrix using `fitness_shrunk` (when available)
+- `substitution_matrix_shrunk.csv`: Shrunk substitution matrix data for further analysis
 - `ref_*/` (with `--group_by_reference`): Per-reference subdirectories containing reference-specific plots and `fitness_analysis_{ref_id}.csv`
 
 **Example with multiple input/output pairs:**
@@ -291,7 +320,10 @@ umic-seq-pacbio fitness \
 **Notes:**
 - Fitness is calculated as `log(rel_output / rel_input)` where relative frequencies are column-normalized
 - Average fitness is the mean across all input/output pairs
-- Bootstrap confidence intervals (95% CI) are calculated using replicate-level resampling (1000 iterations) when multiple replicates are available
+- Uncertainty (`fitness_sigma`, CI bounds) is produced by the selected error model
+- Optional shrinkage uses a normal-prior update:
+  - `weight_obs = tau^2 / (tau^2 + sigma^2)`
+  - `fitness_shrunk = weight_obs * fitness_avg + (1 - weight_obs) * mu0`
 - Epistasis analysis requires both single and double mutants to be present in the dataset
 - Mutability plots show average fitness aggregated across all single mutants at each position, relative to WT
 - Reproducibility plot requires at least 2 replicate pairs
@@ -321,14 +353,28 @@ The pipeline generates:
   - Example AA format: `S45F+Y76P`; wild type is `WT`
 - `merged_on_nonsyn_counts.csv`: haplotype counts merged by identical (REFERENCE_ID, AA_MUTATIONS) patterns
   - Columns: `REFERENCE_ID`, `AA_MUTATIONS`, `CONSENSUS_IDS`, `NUC_MUTATIONS`, plus per-pool count columns
-- `fitness_analysis_results.csv`: Processed fitness data with log ratios, annotations, and bootstrap CIs (from fitness analysis step)
+- `fitness_analysis_results.csv`: Processed fitness data with log ratios, annotations, model-derived uncertainty, and optional shrinkage outputs (from fitness analysis step)
+- `error_model_report.html`: Self-contained error model report HTML (if enabled)
+- `error_model_parameters.csv`: Fitted error model parameters
+- `error_model_diagnostics.json`: Error model diagnostics metadata
+- `error_model_variant_metrics.csv`: Per-variant uncertainty metrics
+- `error_model_stage_contributions_variant.csv`: Per-variant stage attribution
+- `error_model_stage_contributions_global.csv`: Global stage attribution summary
+- `error_model_identifiability.json`: Parameter boundary/identifiability diagnostics
 - `mutability_plot.png`: Average fitness by position for single mutants (from fitness analysis step)
+- `mutability_plot_shrunk.png`: Shrinkage-based mutability plot (when available)
 - `epistasis_plot.png`: Epistasis analysis plot (from fitness analysis step)
+- `epistasis_plot_shrunk.png`: Shrinkage-based epistasis plot (when available)
 - `fitness_distributions.png`: Fitness distributions by mutation type (from fitness analysis step)
+- `fitness_distributions_shrunk.png`: Shrinkage-based fitness distributions (when available)
 - `hamming_distributions.png`: Fitness distributions by Hamming distance (from fitness analysis step)
+- `hamming_distributions_shrunk.png`: Shrinkage-based Hamming distributions (when available)
 - `reproducibility_plot.png`: Replicate comparison heatmaps (from fitness analysis step, if ≥2 replicates)
+- `reproducibility_plot_shrunk.png`: Shrinkage-adjusted replicate heatmaps (when available)
 - `substitution_matrix.png`: Amino acid substitution fitness heatmap (from fitness analysis step)
 - `substitution_matrix.csv`: Substitution matrix data (from fitness analysis step)
+- `substitution_matrix_shrunk.png`: Shrinkage-based substitution matrix heatmap (when available)
+- `substitution_matrix_shrunk.csv`: Shrinkage-based substitution matrix data (when available)
 
 Note that this pipeline has been used for both PacBio and ONT data.
 
