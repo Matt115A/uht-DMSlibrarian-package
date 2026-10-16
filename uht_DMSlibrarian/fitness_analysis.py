@@ -67,6 +67,30 @@ def is_stop_codon(mut: Tuple[str, int, str]) -> bool:
     return mut[2] == '*'
 
 
+# Indel tokens written by ngs_count, e.g. L81fs, Q51del1aa, A50ins2aa
+FRAMESHIFT_RE = re.compile(r'[A-Z*]\d+fs')
+INFRAME_INDEL_RE = re.compile(r'[A-Z*]\d+(?:del|ins)\d+aa')
+
+
+def has_frameshift(aa_mut_str: str) -> bool:
+    """True if the variant carries an indel that is not a multiple of 3."""
+    return isinstance(aa_mut_str, str) and bool(FRAMESHIFT_RE.search(aa_mut_str))
+
+
+def count_indel_events(aa_mut_str: str) -> int:
+    """Number of indel tokens (frameshift + in-frame) in an AA_MUTATIONS string."""
+    if not isinstance(aa_mut_str, str):
+        return 0
+    return len(FRAMESHIFT_RE.findall(aa_mut_str)) + len(INFRAME_INDEL_RE.findall(aa_mut_str))
+
+
+def substitution_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Rows without any indel; indels would confound substitution-level plots."""
+    if 'AA_MUTATIONS' not in df.columns:
+        return df
+    return df[df['AA_MUTATIONS'].apply(count_indel_events) == 0]
+
+
 def is_proline(mut: Tuple[str, int, str]) -> bool:
     """Check if mutation is to proline."""
     return mut[2] == 'P'
@@ -339,16 +363,26 @@ def run_fitness_analysis(
         print("\nParsing mutations...")
         df_filtered['mutations_parsed'] = df_filtered['AA_MUTATIONS'].apply(parse_aa_mutations)
         df_filtered['n_mutations'] = df_filtered['mutations_parsed'].apply(len)
-        df_filtered['hamming'] = df_filtered['n_mutations']
+        # FIX: indels are now annotated. Count each indel as one event so that
+        # e.g. "K38R+L81fs" is not treated as a single substitution mutant.
+        df_filtered['hamming'] = df_filtered['n_mutations'] + df_filtered['AA_MUTATIONS'].apply(count_indel_events)
         
         # Identify mutation types
+        # has_stop: premature stop codon from a substitution (nonsense SNV)
         df_filtered['has_stop'] = df_filtered['mutations_parsed'].apply(
             lambda muts: any(is_stop_codon(m) for m in muts)
         )
+        # has_frameshift: carries an indel whose length is not a multiple of 3
+        df_filtered['has_frameshift'] = df_filtered['AA_MUTATIONS'].apply(has_frameshift)
         df_filtered['has_proline'] = df_filtered['mutations_parsed'].apply(
             lambda muts: any(is_proline(m) for m in muts) and not any(is_stop_codon(m) for m in muts)
+        ) & ~df_filtered['has_frameshift']
+        df_filtered['other'] = ~(
+            df_filtered['has_stop'] | df_filtered['has_proline']
+            | df_filtered['has_frameshift']
+            | df_filtered['AA_MUTATIONS'].apply(lambda a: isinstance(a, str) and bool(INFRAME_INDEL_RE.search(a)))
+            | (df_filtered['AA_MUTATIONS'] == 'NO_GENE')
         )
-        df_filtered['other'] = ~(df_filtered['has_stop'] | df_filtered['has_proline'])
         
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -588,6 +622,9 @@ def plot_mutability(
         # Only singles if no filter
         combined = df[df['hamming'] == 1].copy()
     
+    # Substitution-only variants: an indel would confound per-position effects
+    combined = substitution_only(combined)
+
     if len(combined) == 0:
         print("    WARNING: No mutants found, skipping mutability plot")
         return
@@ -676,11 +713,11 @@ def plot_epistasis_single_double(
     
     # Get all single mutants, excluding stop codons
     singles = df[df['hamming'] == 1].copy()
-    singles = singles[~singles['has_stop']].copy()  # Remove stop codons
+    singles = substitution_only(singles[~singles['has_stop']]).copy()  # Remove stop codons and indels
     
     # Get all double mutants, excluding those with stop codons
     doubles = df[df['hamming'] == 2].copy()
-    doubles = doubles[~doubles['has_stop']].copy()  # Remove stop codons
+    doubles = substitution_only(doubles[~doubles['has_stop']]).copy()  # Remove stop codons and indels
     
     if len(singles) == 0 or len(doubles) == 0:
         print("    WARNING: Need both single and double mutants for epistasis plot")
@@ -753,7 +790,12 @@ def plot_fitness_distributions(
     fitness_col: str = "fitness_avg",
     output_suffix: str = "",
 ):
-    """Plot overlaid KDE plots for single mutants: stop codons, proline, others."""
+    """Plot overlaid KDE plots for single mutants: stop codons, frameshifts, proline, others.
+
+    A single mutant carries exactly one event (hamming == 1): either one
+    substitution or one indel. Frameshifts are therefore variants whose only
+    change is a single frameshifting indel.
+    """
     if fitness_col not in df.columns:
         print(f"    WARNING: Fitness column '{fitness_col}' not found, skipping fitness distribution plot")
         return
@@ -769,18 +811,18 @@ def plot_fitness_distributions(
     
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Plot KDEs for each category
-    if singles['has_stop'].any():
-        stops = singles[singles['has_stop']][fitness_col]
-        sns.kdeplot(stops, label='Stop Codons', ax=ax, linewidth=2)
-    
-    if singles['has_proline'].any():
-        prolines = singles[singles['has_proline']][fitness_col]
-        sns.kdeplot(prolines, label='Proline Mutations', ax=ax, linewidth=2)
-    
-    if singles['other'].any():
-        others = singles[singles['other']][fitness_col]
-        sns.kdeplot(others, label='Other Mutations', ax=ax, linewidth=2)
+    # Plot KDEs for each category. Colours are fixed so stop/proline/other keep
+    # their original colours (default cycle C0-C2); frameshifts are added as C3.
+    categories = [
+        ('has_stop', 'Stop Codons', 'C0'),
+        ('has_proline', 'Proline Mutations', 'C1'),
+        ('other', 'Other Mutations', 'C2'),
+        ('has_frameshift', 'Frameshifts', 'C3'),
+    ]
+    for col, name, color in categories:
+        if col in singles.columns and singles[col].any():
+            vals = singles.loc[singles[col], fitness_col]
+            sns.kdeplot(vals, label=name, ax=ax, linewidth=2, color=color)
     
     ax.set_xlabel('Fitness (log ratio)')
     ax.set_ylabel('Density')
@@ -979,7 +1021,9 @@ def plot_substitution_matrix(
     # Collect all (wt, mut) pairs and their fitnesses
     substitution_data = defaultdict(list)
     
-    for _, row in df.iterrows():
+    # Substitution-only variants: an indel would confound substitution effects
+    sub_df = substitution_only(df)
+    for _, row in sub_df.iterrows():
         muts = row['mutations_parsed']
         fitness = row[fitness_col]
         

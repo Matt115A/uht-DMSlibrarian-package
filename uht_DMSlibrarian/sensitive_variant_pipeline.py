@@ -52,79 +52,103 @@ def extract_variants_from_sam(sam_file, reference_file_or_seq, output_vcf,
         ref_seq = reference_file_or_seq
     
     # Read SAM alignment
-    # Use dictionary to deduplicate variants by position (chr:pos:ref:alt)
-    # This ensures only one variant per position is kept
+    # Keyed by (chr, pos, ref, alt) so an SNV and an indel anchored on the same
+    # base are both kept. Only the primary alignment is used.
     variants_dict = {}
-    
+    # Reference span covered by the primary alignment (1-based, inclusive);
+    # None means the gene was not found in the consensus.
+    gene_span = None
+
     with open(sam_file, 'r') as f:
         for line in f:
             if line.startswith('@'):
                 continue
-            
+
             parts = line.strip().split('\t')
             if len(parts) < 11:
                 continue
-            
-            # Check SAM flag - skip secondary alignments (flag 0x100 = 256)
-            # Only process primary alignments
+
+            # FIX: skip unmapped (0x4), secondary (0x100) and supplementary (0x800)
+            # alignments. Supplementary records previously added spurious calls.
             try:
                 flag = int(parts[1])
-                if flag & 0x100:  # Secondary alignment flag
+                if flag & (0x4 | 0x100 | 0x800):
                     continue
             except (ValueError, IndexError):
                 continue
-                
+
             cigar = parts[5]
-            seq = parts[9]
-            
+            seq = parts[9].upper()
+
             # Skip if CIGAR is * (unmapped)
             if cigar == '*':
                 continue
-            
-            # Parse CIGAR string to find mismatches
+
             pos = int(parts[3]) - 1  # Convert to 0-based
             seq_pos = 0
             ref_pos = pos
-            
-            # Simple CIGAR parsing (only handles M, D, I, S)
-            cigar_parts = re.findall(r'(\d+)([MDIS])', cigar)
-            
+            chrom = parts[2]
+
+            cigar_parts = re.findall(r'(\d+)([MIDNSHP=X])', cigar)
+
             for length, op in cigar_parts:
                 length = int(length)
-                
-                if op == 'M':  # Match or mismatch
+
+                if op in 'M=X':  # Match or mismatch
                     for i in range(length):
                         if ref_pos < len(ref_seq) and seq_pos < len(seq):
                             if ref_seq[ref_pos] != seq[seq_pos]:
-                                # Found a mismatch!
-                                # Use position as key to deduplicate
-                                # If same position has different ALT, keep the first one encountered
-                                var_key = (parts[2], ref_pos + 1)  # chr, pos (1-based)
-                                if var_key not in variants_dict:
-                                    variants_dict[var_key] = {
-                                        'chr': parts[2],
-                                        'pos': ref_pos + 1,  # Convert back to 1-based
-                                        'ref': ref_seq[ref_pos],
-                                        'alt': seq[seq_pos],
-                                        'qual': 30  # Default quality
-                                    }
-                            ref_pos += 1
-                            seq_pos += 1
-                
-                elif op == 'D':  # Deletion in read (insertion in reference)
-                    # Skip reference positions
+                                key = (chrom, ref_pos + 1, ref_seq[ref_pos], seq[seq_pos])
+                                variants_dict.setdefault(key, {
+                                    'chr': chrom,
+                                    'pos': ref_pos + 1,
+                                    'ref': ref_seq[ref_pos],
+                                    'alt': seq[seq_pos],
+                                    'qual': 30
+                                })
+                        ref_pos += 1
+                        seq_pos += 1
+
+                elif op in 'DN':  # Deletion from the reference
+                    # FIX: previously skipped silently. Emit a VCF deletion
+                    # anchored on the preceding reference base (VCF 4.2).
+                    if ref_pos > 0:
+                        vpos = ref_pos  # 1-based position of anchor base
+                        vref = ref_seq[ref_pos - 1:ref_pos + length]
+                        valt = ref_seq[ref_pos - 1]
+                    else:
+                        # Deletion at the first base: anchor on the following base
+                        vpos = 1
+                        vref = ref_seq[0:length + 1]
+                        valt = ref_seq[length]
+                    key = (chrom, vpos, vref, valt)
+                    variants_dict.setdefault(key, {
+                        'chr': chrom, 'pos': vpos, 'ref': vref, 'alt': valt, 'qual': 30
+                    })
                     ref_pos += length
-                
-                elif op == 'I':  # Insertion in read (deletion in reference)
-                    # Skip read positions
+
+                elif op == 'I':  # Insertion relative to the reference
+                    # FIX: previously skipped silently. Emit a VCF insertion
+                    # anchored on the preceding reference base. Insertions
+                    # before the first or after the last gene base are flank.
+                    if 0 < ref_pos < len(ref_seq):
+                        inserted = seq[seq_pos:seq_pos + length]
+                        vref = ref_seq[ref_pos - 1]
+                        key = (chrom, ref_pos, vref, vref + inserted)
+                        variants_dict.setdefault(key, {
+                            'chr': chrom, 'pos': ref_pos, 'ref': vref,
+                            'alt': vref + inserted, 'qual': 30
+                        })
                     seq_pos += length
-                
+
                 elif op == 'S':  # Soft clip
-                    # Skip read positions
                     seq_pos += length
-    
+                # H and P consume neither sequence
+
+            gene_span = (pos + 1, ref_pos)
+
     # Convert dictionary to sorted list
-    variants = sorted(variants_dict.values(), key=lambda x: (x['chr'], x['pos']))
+    variants = sorted(variants_dict.values(), key=lambda x: (x['chr'], x['pos'], len(x['ref']), len(x['alt'])))
     
     # Write VCF
     with open(output_vcf, 'w') as f:
@@ -135,6 +159,14 @@ def extract_variants_from_sam(sam_file, reference_file_or_seq, output_vcf,
             f.write(f"##reference={reference_id}\n")
         elif os.path.isfile(reference_file_or_seq):
             f.write(f"##reference={reference_file_or_seq}\n")
+        # FIX: record whether/where the gene was found, so downstream steps can
+        # tell a WT consensus from one that does not contain the gene.
+        if gene_span is None:
+            f.write("##gene_status=ABSENT\n")
+        else:
+            status = "FULL" if gene_span == (1, len(ref_seq)) else "PARTIAL"
+            f.write(f"##gene_status={status}\n")
+            f.write(f"##gene_span={gene_span[0]}-{gene_span[1]}\n")
         f.write("##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n")
         f.write("##INFO=<ID=AD,Number=R,Type=Integer,Description=\"Allelic Depth\">\n")
         f.write("##INFO=<ID=REFERENCE_ID,Number=1,Type=String,Description=\"Reference template ID\">\n")
@@ -151,6 +183,93 @@ def extract_variants_from_sam(sam_file, reference_file_or_seq, output_vcf,
             f.write(f"{var['chr']}\t{var['pos']}\t.\t{var['ref']}\t{var['alt']}\t"
                    f"{var['qual']}\tPASS\t{info_field}\tGT:AD:DP\t1/1:0,1:1\n")
     
+    return len(variants)
+
+
+def _read_gene_status(vcf_file):
+    with open(vcf_file) as f:
+        for line in f:
+            if not line.startswith('##'):
+                break
+            if line.startswith('##gene_status='):
+                return line.strip().split('=', 1)[1]
+    return None
+
+
+def realign_partial_globally(consensus_file, ref_seq, vcf_file, reference_id=None):
+    """FIX: rescue consensuses where minimap2's primary alignment does not span
+    the whole gene (status PARTIAL).
+
+    minimap2 clips or splits alignments around large deletions and sometimes
+    around clustered mismatches, so variants outside the aligned span were
+    silently treated as WT. Here the full reference is aligned end-to-end
+    against the consensus (consensus flanks free, both strands) and the VCF is
+    rewritten. If even this alignment is poor, the gene is marked ABSENT.
+    """
+    from Bio import Align
+    from Bio.Seq import Seq
+
+    with open(consensus_file) as f:
+        cons = ''.join(l.strip() for l in f if not l.startswith('>')).upper()
+    ref_seq = ref_seq.upper()
+
+    aligner = Align.PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.match_score = 2
+    aligner.mismatch_score = -3
+    aligner.open_gap_score = -6
+    aligner.extend_gap_score = -1
+    aligner.query_end_gap_score = 0    # consensus flanks around the gene are free
+    aligner.target_end_gap_score = -6  # unaligned gene ends are penalised
+
+    best = None
+    for seq in (cons, str(Seq(cons).reverse_complement())):
+        aln = aligner.align(seq, ref_seq)[0]
+        if best is None or aln.score > best[0].score:
+            best = (aln, seq)
+    aln, seq = best
+
+    variants = []
+    # Same threshold as the independent check: ~>=85% identity over the gene
+    if aln.score >= len(ref_seq):
+        t_blocks, q_blocks = aln.aligned  # target = consensus, query = reference
+        if q_blocks[0][0] > 0:  # gene start missing: deletion anchored on next base
+            n = q_blocks[0][0]
+            variants.append((1, ref_seq[:n + 1], ref_seq[n]))
+        for i in range(len(t_blocks)):
+            ts, te = t_blocks[i]
+            qs, qe = q_blocks[i]
+            for k in range(qe - qs):
+                if seq[ts + k] != ref_seq[qs + k]:
+                    variants.append((qs + k + 1, ref_seq[qs + k], seq[ts + k]))
+            if i + 1 < len(t_blocks):
+                dq = q_blocks[i + 1][0] - qe
+                dt = t_blocks[i + 1][0] - te
+                if dq > 0:
+                    variants.append((qe, ref_seq[qe - 1:qe + dq], ref_seq[qe - 1]))
+                if dt > 0:
+                    anchor = qe + dq
+                    variants.append((anchor, ref_seq[anchor - 1], ref_seq[anchor - 1] + seq[te:te + dt]))
+        if q_blocks[-1][1] < len(ref_seq):  # gene end missing
+            qe = q_blocks[-1][1]
+            variants.append((qe, ref_seq[qe - 1:], ref_seq[qe - 1]))
+        status = 'FULL_REALIGNED'
+    else:
+        status = 'ABSENT'
+
+    chrom = reference_id or 'reference'
+    with open(vcf_file) as f:
+        header = [l for l in f if l.startswith('#')]
+    with open(vcf_file, 'w') as f:
+        for l in header:
+            if l.startswith('##gene_status='):
+                l = f"##gene_status={status}\n##minimap2_gene_status=PARTIAL\n"
+            elif l.startswith('##gene_span=') and status == 'ABSENT':
+                continue
+            f.write(l)
+        for pos, r, a in sorted(variants):
+            info = "DP=1" + (f";REFERENCE_ID={reference_id}" if reference_id else "")
+            f.write(f"{chrom}\t{pos}\t.\t{r}\t{a}\t30\tPASS\t{info}\tGT:AD:DP\t1/1:0,1:1\n")
     return len(variants)
 
 def align_and_call_variants_sensitive(consensus_file, reference_file_or_manager, output_dir):
@@ -218,6 +337,10 @@ def align_and_call_variants_sensitive(consensus_file, reference_file_or_manager,
                 variant_count = extract_variants_from_sam(
                     sam_file, ref_seq, vcf_file, reference_id=best_ref_id
                 )
+                if _read_gene_status(vcf_file) == 'PARTIAL':
+                    variant_count = realign_partial_globally(
+                        consensus_file, ref_seq, vcf_file, reference_id=best_ref_id
+                    )
 
                 # Clean up intermediate files
                 os.remove(sam_file)
@@ -227,10 +350,8 @@ def align_and_call_variants_sensitive(consensus_file, reference_file_or_manager,
                 if ref_temp_file and os.path.exists(ref_temp_file):
                     os.remove(ref_temp_file)
 
-            if variant_count == 0:
-                # Still write a minimal VCF with reference info for WT
-                _write_empty_vcf_with_ref(vcf_file, best_ref_id)
-                return vcf_file
+            # FIX: the VCF already carries ##reference and ##gene_status. The old
+            # WT placeholder overwrote it, turning gene-absent consensuses into WT.
 
             return vcf_file
 
@@ -256,6 +377,10 @@ def align_and_call_variants_sensitive(consensus_file, reference_file_or_manager,
 
             # Step 2: Extract variants directly from SAM
             variant_count = extract_variants_from_sam(sam_file, reference_file, vcf_file)
+            if _read_gene_status(vcf_file) == 'PARTIAL':
+                with open(reference_file) as rf:
+                    ref_str = ''.join(l.strip() for l in rf if not l.startswith('>'))
+                variant_count = realign_partial_globally(consensus_file, ref_str, vcf_file)
 
             # Clean up intermediate files
             os.remove(sam_file)

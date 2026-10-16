@@ -338,6 +338,41 @@ def read_vcf_haplotype(vcf_path: str) -> Tuple[str, List[Tuple[str, int, str, st
     return ';'.join(m for _, m in muts), variants, reference_id
 
 
+def read_vcf_gene_status(vcf_path: str) -> Optional[str]:
+    """Return ##gene_status (FULL/PARTIAL/ABSENT) from a VCF, or None for VCFs
+    written by older versions that did not record it."""
+    if not os.path.exists(vcf_path):
+        return None
+    with open(vcf_path, 'r') as f:
+        for line in f:
+            if not line.startswith('##'):
+                break
+            if line.startswith('##gene_status='):
+                return line.strip().split('=', 1)[1]
+    return None
+
+
+def _indel_events(variants: List[Tuple[str, int, str, str]]) -> List[Tuple[int, str, int]]:
+    """Convert VCF indel records to (start0, kind, n_bases) in reference coordinates.
+
+    start0 is the 0-based index of the first deleted base (deletions) or the
+    0-based index before which bases are inserted (insertions).
+    """
+    events = []
+    for _chrom, pos, ref_allele, alt_allele in variants:
+        if len(ref_allele) == len(alt_allele):
+            continue
+        if len(ref_allele) > len(alt_allele):
+            n = len(ref_allele) - len(alt_allele)
+            # Anchor base precedes the deletion, except for a deletion at base 1
+            start0 = pos if ref_allele[0] == alt_allele[0] else pos - 1
+            events.append((start0, 'del', n))
+        else:
+            n = len(alt_allele) - len(ref_allele)
+            events.append((pos, 'ins', n))
+    return sorted(events)
+
+
 def collect_all_variant_rows(variants_dir: str) -> Tuple[List[Tuple[str,int,str,str]], Dict[str, List[int]]]:
     """Return list of unique variant keys and mapping from consensus name to indices in that list."""
     unique: Dict[Tuple[str,int,str,str], int] = {}
@@ -405,16 +440,30 @@ def collect_haplotype_rows(variants_dir: str, ref_seq_or_manager) -> Tuple[List[
         ref_id = vcf_ref_id if vcf_ref_id and vcf_ref_id in ref_sequences else default_ref_id
         ref = ref_sequences[ref_id]
 
+        # FIX: a consensus that does not contain the gene is not WT
+        if read_vcf_gene_status(vpath) == 'ABSENT':
+            rows.append((name, muts_str, 'NO_GENE', ref_id))
+            index[name] = len(rows) - 1
+            continue
+
+        ref_protein = str(ref.translate())
+
+        # FIX: indels were never present in the VCFs. Now they are; keep them
+        # out of the codon-substitution logic and annotate them separately.
+        snvs = [v for v in variants if len(v[2]) == 1 and len(v[3]) == 1]
+        indels = _indel_events(variants)
+
         # Convert to amino acid mutations - prevariant neess fall within codon
         codons: Dict[int, List[Tuple[int, str, str]]] = {}
-        for chrom, pos, ref_allele, alt_allele in variants:
+        for chrom, pos, ref_allele, alt_allele in snvs:
             pos_0 = pos - 1  # 0-based
             codon_pos = pos_0 // 3
             if codon_pos not in codons:
                 codons[codon_pos] = []
             codons[codon_pos].append((pos_0, ref_allele, alt_allele))
 
-        aa_muts = []
+        # (codon number, token) so substitutions and indels sort together
+        aa_tokens: List[Tuple[int, str]] = []
         for codon_pos in sorted(codons.keys()):
             codon_start = codon_pos * 3
             if codon_start + 3 > len(ref):
@@ -427,9 +476,6 @@ def collect_haplotype_rows(variants_dir: str, ref_seq_or_manager) -> Tuple[List[
             # Apply all mutations in this codon
             valid = True
             for pos_0, ref_allele, alt_allele in codons[codon_pos]:
-                if len(ref_allele) != 1 or len(alt_allele) != 1:
-                    valid = False
-                    break
                 rel_pos = pos_0 - codon_start
                 if rel_pos < 3 and pos_0 < len(ref) and ref[pos_0] == ref_allele:
                     mut_codon[rel_pos] = alt_allele
@@ -440,7 +486,7 @@ def collect_haplotype_rows(variants_dir: str, ref_seq_or_manager) -> Tuple[List[
             if not valid:
                 # Fallback: record as codon number (amino acid position)
                 wt_aa = str(Seq(wt_codon).translate())
-                aa_muts.append(f"{wt_aa}{codon_pos + 1}X")
+                aa_tokens.append((codon_pos + 1, f"{wt_aa}{codon_pos + 1}X"))
                 continue
 
             mut_codon_str = ''.join(mut_codon)
@@ -449,9 +495,25 @@ def collect_haplotype_rows(variants_dir: str, ref_seq_or_manager) -> Tuple[List[
 
             if wt_aa != mut_aa:
                 # Non-synonymous - record as amino acid
-                aa_muts.append(f"{wt_aa}{codon_pos + 1}{mut_aa}")
+                aa_tokens.append((codon_pos + 1, f"{wt_aa}{codon_pos + 1}{mut_aa}"))
             # Skip synonymous mutations (silent changes)
 
+        # Indel tokens use lowercase suffixes so fitness_analysis's substitution
+        # regex ([A-Z])(\d+)([A-Z*]) does not mistake them for substitutions:
+        #   frameshift   L81fs    (first frameshifting indel only; frame is lost after it)
+        #   in-frame     Q51del1aa / A50ins2aa
+        fs_seen = False
+        for start0, kind, n in indels:
+            codon = min(start0 // 3 + 1, len(ref_protein))
+            wt_aa = ref_protein[codon - 1]
+            if n % 3:
+                if not fs_seen:
+                    aa_tokens.append((codon, f"{wt_aa}{codon}fs"))
+                    fs_seen = True
+            else:
+                aa_tokens.append((codon, f"{wt_aa}{codon}{kind}{n // 3}aa"))
+
+        aa_muts = [t for _, t in sorted(aa_tokens, key=lambda x: x[0])]
         aa_muts_str = '+'.join(aa_muts) if aa_muts else 'WT'
         rows.append((name, muts_str, aa_muts_str, ref_id))
         index[name] = len(rows) - 1
