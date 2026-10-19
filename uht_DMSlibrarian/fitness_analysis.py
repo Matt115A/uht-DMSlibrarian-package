@@ -612,15 +612,8 @@ def plot_mutability(
         return
     wt_fitness = wt_rows[fitness_col].iloc[0]
     
-    # Filter to Hamming 1 (single mutants) and Hamming 2 (double mutants) if filtering by AA
-    if aa_filter is not None:
-        # Include singles and doubles (doubles will be included if they contain the filtered AA)
-        hamming1 = df[df['hamming'] == 1].copy()
-        hamming2 = df[df['hamming'] == 2].copy()
-        combined = pd.concat([hamming1, hamming2], ignore_index=True)
-    else:
-        # Only singles if no filter
-        combined = df[df['hamming'] == 1].copy()
+    # Single mutants only (Hamming 1), with or without an amino acid filter
+    combined = df[df['hamming'] == 1].copy()
     
     # Substitution-only variants: an indel would confound per-position effects
     combined = substitution_only(combined)
@@ -637,7 +630,6 @@ def plot_mutability(
     
     for _, row in combined.iterrows():
         muts = row['mutations_parsed']
-        # For singles, include directly
         if len(muts) == 1:
             wt, pos, mut = muts[0]
             # Filter by mutant amino acid (not wild-type)
@@ -646,14 +638,6 @@ def plot_mutability(
                 fitnesses.append(row[fitness_col])
                 wt_aas.append(wt)
                 mut_aas.append(mut)
-        # For doubles, include if any mutation matches the filter
-        elif len(muts) == 2 and aa_filter is not None:
-            for wt, pos, mut in muts:
-                if mut == aa_filter:
-                    positions.append(pos)
-                    fitnesses.append(row[fitness_col])
-                    wt_aas.append(wt)
-                    mut_aas.append(mut)
     
     if len(positions) == 0:
         print(f"    WARNING: No mutations found for filter '{aa_filter}'")
