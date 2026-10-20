@@ -332,18 +332,21 @@ def align_and_call_variants_sensitive(consensus_file, reference_file_or_manager,
     sam_file = os.path.join(output_dir, f"{consensus_name}.sam")
     ref_temp_file = None
     try:
+        with open(consensus_file, 'r') as f:
+            consensus_seq = ''.join(line.strip() for line in f if not line.startswith('>'))
+        # An empty consensus means consensus generation failed; the genotype is
+        # unknown, so don't report it as WT or as gene-absent (this also removes
+        # VCFs that earlier versions wrote for such consensuses).
+        if not consensus_seq:
+            if os.path.exists(vcf_file):
+                os.remove(vcf_file)
+            return f"Empty consensus for {consensus_name} (consensus generation failed)"
+
         # Reuse a finished VCF; redo missing, truncated or stale ones
         if is_vcf_up_to_date(vcf_file, consensus_file):
             return vcf_file
         if os.path.exists(vcf_file):
             os.remove(vcf_file)
-
-        with open(consensus_file, 'r') as f:
-            consensus_seq = ''.join(line.strip() for line in f if not line.startswith('>'))
-        # An empty consensus means consensus generation failed; the genotype is
-        # unknown, so don't report it as WT or as gene-absent.
-        if not consensus_seq:
-            return f"Empty consensus for {consensus_name} (consensus generation failed)"
 
         # Determine reference mode
         is_multi_ref = (ReferenceManager is not None and
