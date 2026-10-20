@@ -175,6 +175,17 @@ def run_consensus_generation(args):
         print("No cluster files found!")
         return False
 
+    # Remove consensus files whose cluster no longer exists (left by an earlier
+    # clustering run); they would otherwise be passed on to variant calling.
+    cluster_names = {Path(cf).stem for cf in cluster_files}
+    orphans = [f for f in os.listdir(output_dir)
+               if f.endswith('_consensus.fasta') and not f.startswith('.')
+               and f[:-len('_consensus.fasta')] not in cluster_names]
+    for f in orphans:
+        os.remove(os.path.join(output_dir, f))
+    if orphans:
+        print(f"Removed {len(orphans):,} consensus files with no matching cluster file (from an earlier run)")
+
     # Track progress
     success_count = 0
     failed_count = 0

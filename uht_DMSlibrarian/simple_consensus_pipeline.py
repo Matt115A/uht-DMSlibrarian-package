@@ -333,6 +333,22 @@ def wait_for_memory_relief(threshold_percent=75, timeout=60, check_interval=2):
         time.sleep(check_interval)
     return False
 
+def _has_consensus_sequence(path):
+    """True if a consensus FASTA holds a non-empty sequence (not a crashed run's 0-byte file)."""
+    try:
+        with open(path) as f:
+            return any(line.strip() and not line.startswith('>') for line in f)
+    except OSError:
+        return False
+
+
+def is_consensus_up_to_date(consensus_file, cluster_file):
+    """A consensus can be reused only if it is complete and not older than its cluster file."""
+    return (os.path.exists(consensus_file)
+            and _has_consensus_sequence(consensus_file)
+            and os.path.getmtime(consensus_file) >= os.path.getmtime(cluster_file))
+
+
 def run_abpoa_consensus(cluster_file, output_dir, max_reads=20, memory_limit_mb=1024, max_seq_len=15000, error_logger=None):
     """
     Run abpoa to generate consensus sequence from first N reads.
@@ -346,14 +362,17 @@ def run_abpoa_consensus(cluster_file, output_dir, max_reads=20, memory_limit_mb=
         error_logger: Optional ConsensusErrorLogger instance for logging errors
     """
     temp_file = None
+    partial_file = None
     cluster_name = Path(cluster_file).stem
 
     try:
         consensus_file = os.path.join(output_dir, f"{cluster_name}_consensus.fasta")
 
-        # Skip if already exists
-        if os.path.exists(consensus_file):
+        # Reuse a finished consensus; redo missing, empty (crashed) or stale ones
+        if is_consensus_up_to_date(consensus_file, cluster_file):
             return consensus_file
+        if os.path.exists(consensus_file):
+            os.remove(consensus_file)
 
         # Validate input FASTA file before processing
         validation = validate_fasta_file(cluster_file)
@@ -439,12 +458,14 @@ def run_abpoa_consensus(cluster_file, output_dir, max_reads=20, memory_limit_mb=
                 )
             return error_msg
 
-        # Run abpoa consensus
+        # Run abpoa consensus. abpoa creates its output file as soon as it starts,
+        # so write to a temporary name and only rename once the consensus is complete.
+        partial_file = consensus_file + ".partial"
         cmd = [
             "abpoa",
             "-r", "0",    # output consensus in FASTA format
             "-a", "0",    # heaviest bundling path algorithm
-            "-o", consensus_file,
+            "-o", partial_file,
             temp_file
         ]
 
@@ -483,27 +504,22 @@ def run_abpoa_consensus(cluster_file, output_dir, max_reads=20, memory_limit_mb=
                 )
             return error_msg
 
-        # Verify output file was created
-        if not os.path.exists(consensus_file):
-            error_msg = f"abpoa did not produce output for {cluster_name}"
+        # Verify a non-empty consensus was produced
+        if not _has_consensus_sequence(partial_file):
+            error_msg = f"abpoa did not produce a consensus sequence for {cluster_name}"
             if error_logger:
                 error_logger.log_error(
                     cluster_name,
                     'ABPOA',
-                    'abpoa succeeded but no output file was created',
+                    'abpoa succeeded but produced no consensus sequence',
                     details={'expected_output': consensus_file}
                 )
             return error_msg
 
+        os.replace(partial_file, consensus_file)
         return consensus_file
 
     except subprocess.TimeoutExpired:
-        # Clean up any partial output
-        if os.path.exists(os.path.join(output_dir, f"{cluster_name}_consensus.fasta")):
-            try:
-                os.remove(os.path.join(output_dir, f"{cluster_name}_consensus.fasta"))
-            except:
-                pass
         error_msg = f"abpoa timeout for {cluster_name}"
         if error_logger:
             error_logger.log_error(
@@ -533,12 +549,13 @@ def run_abpoa_consensus(cluster_file, output_dir, max_reads=20, memory_limit_mb=
             )
         return error_msg
     finally:
-        # Always clean up temp file
-        if temp_file and os.path.exists(temp_file):
-            try:
-                os.remove(temp_file)
-            except:
-                pass
+        # Always clean up temp files, including output from a failed abpoa run
+        for path in (temp_file, partial_file):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 def process_cluster_simple(cluster_file, output_dir, max_reads=20, memory_limit_mb=1024, max_seq_len=15000, error_logger=None):
     """
