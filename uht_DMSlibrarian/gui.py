@@ -34,6 +34,7 @@ from .cli import (
     get_file_size_mb
 )
 from . import ngs_count
+from .reference_manager import ReferenceManager
 from . import fitness_analysis
 
 
@@ -155,6 +156,13 @@ button.secondary, .gr-button-secondary {
 """
 
 
+def _num(value, default, cast=int):
+    """Numeric GUI field; only an empty field falls back to the default (0 is a valid value)."""
+    if value is None or value == '':
+        return default
+    return cast(value)
+
+
 def create_metrics_plot(metrics_type: str = 'pipeline'):
     """Create a real-time metrics plot."""
     fig, axes = plt.subplots(2, 1, figsize=(10, 6))
@@ -206,16 +214,16 @@ def run_pipeline_with_progress(
             probe=probe_path,
             reference=reference_path,
             output_dir=output_dir,
-            umi_len=int(umi_len) if umi_len else 52,
+            umi_len=_num(umi_len, 52),
             umi_loc=umi_loc if umi_loc else 'up',
-            min_probe_score=int(min_probe_score) if min_probe_score else 15,
+            min_probe_score=_num(min_probe_score, 15),
             fast=True,
             slow=False,
-            identity=float(identity) if identity else 0.90,
-            size_thresh=int(size_thresh) if size_thresh else 10,
-            max_reads=int(max_reads) if max_reads else 20,
-            max_seq_len=int(max_seq_len) if max_seq_len else 15000,
-            max_workers=int(max_workers) if max_workers else 4,
+            identity=_num(identity, 0.90, float),
+            size_thresh=_num(size_thresh, 10),
+            max_reads=_num(max_reads, 20),
+            max_seq_len=_num(max_seq_len, 15000),
+            max_workers=_num(max_workers, 4),
             report=report_file if report_file else None
         )
         
@@ -276,13 +284,13 @@ def run_ngs_with_progress(
                 consensus_dir,
                 variants_dir,
                 probe_path,
-                int(ngs_umi_len) if ngs_umi_len else 52,
+                _num(ngs_umi_len, 52),
                 ngs_umi_loc if ngs_umi_loc else 'up',
                 ngs_output,
-                reference_path,
-                int(left_ignore) if left_ignore else 22,
-                int(right_ignore) if right_ignore else 24,
-                umi_mismatches=int(ngs_umi_mismatches) if ngs_umi_mismatches is not None else 0
+                ReferenceManager(reference_path),
+                _num(left_ignore, 22),
+                _num(right_ignore, 24),
+                umi_mismatches=_num(ngs_umi_mismatches, 0)
             )
         
         output_text = output_capture.getvalue()
@@ -333,7 +341,7 @@ def run_fitness_with_progress(
                 fitness_output_dir,
                 input_pool_list,
                 output_pool_list,
-                int(min_input) if min_input else 10,
+                _num(min_input, 10),
                 aa_filter if aa_filter else None,
                 False,
                 error_model if error_model else "bootstrap",
@@ -343,11 +351,11 @@ def run_fitness_with_progress(
                     else error_model_config_file
                 ) if error_model_config_file else None,
                 bool(fit_error_model),
-                int(error_model_bootstraps) if error_model_bootstraps else None,
+                _num(error_model_bootstraps, None),
                 single_rep_mode if single_rep_mode else "fallback",
                 bool(report_html),
                 report_html_path if report_html_path else None,
-                int(random_seed) if random_seed is not None else 42,
+                _num(random_seed, 42),
             )
         
         output_text = output_capture.getvalue()

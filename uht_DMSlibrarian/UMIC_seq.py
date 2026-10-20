@@ -357,7 +357,7 @@ if __name__ == '__main__' and mode == 'UMIextract':
     
     start_time = time.time()
     print("Starting UMI extraction...")
-    print("Progress will be shown for every sequence...")
+    print("Progress will be shown every 10,000 sequences...")
     
     # Use streaming approach for compressed files
     try:
@@ -973,5 +973,7 @@ if __name__ == '__main__' and mode == 'clusterfull_fast':
         print("✓ Fast clustering completed successfully!")
     else:
         print("✗ Fast clustering failed!")
+        import sys
+        sys.exit(1)  # so 'cluster' and 'all' report the failure
 
 

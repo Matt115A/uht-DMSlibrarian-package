@@ -686,6 +686,9 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
     """
     try:
         print("Starting...", flush=True)
+        # Create the output folder up front: otherwise a missing folder only
+        # fails when writing results, after all pools have been counted
+        os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
         print("Loading probe sequences...", flush=True)
         probe_fwd, probe_rev = load_probe_sequences(probe_fasta)
         print(f"Probe length: {len(probe_fwd)} bp", flush=True)

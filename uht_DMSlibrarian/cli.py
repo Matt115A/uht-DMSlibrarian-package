@@ -676,13 +676,17 @@ def count_files_in_directory(directory, pattern_start="", pattern_end=""):
 
 
 def count_vcf_variants(vcf_file):
-    """Count variant lines in a VCF file (excluding header)."""
+    """Count variant lines in a VCF file (excluding header and the position-0
+    WT / gene-absent marker lines of the combined VCF)."""
     try:
         count = 0
         with open(vcf_file, 'r') as f:
             for line in f:
-                if not line.startswith('#'):
-                    count += 1
+                if line.startswith('#') or not line.strip():
+                    continue
+                if line.split('\t')[1] == '0':
+                    continue
+                count += 1
         return count
     except Exception:
         return None

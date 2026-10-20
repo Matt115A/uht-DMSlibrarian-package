@@ -445,6 +445,8 @@ def vcf_to_csv_detailed(vcf_file, reference_fasta_or_manager, output_csv,
         for warning in validate_references(ref_sequences, vcf_ref_ids):
             print(f"  {warning}")
 
+    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
+
     # Parse VCF and group variants by cluster using streaming
     cluster_variants, cluster_reference_ids, absent_clusters = parse_vcf_combined_streaming(vcf_file)
 
