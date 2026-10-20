@@ -603,6 +603,19 @@ if __name__ == '__main__' and mode == 'clustertest':
 #FULL CLUSTERING
 
 ##Change max_clusters to eg 10 for testing, leave out/set to 0 for production
+def _remove_stale_cluster_files(output_folder):
+    """Delete cluster_N.fasta files left by a previous run in this folder.
+
+    Cluster numbers are reassigned on every run, so leftovers would be mixed
+    in with (and indistinguishable from) the new clusters.
+    """
+    stale = [f for f in os.listdir(output_folder)
+             if f.startswith('cluster_') and f.endswith('.fasta')]
+    for f in stale:
+        os.remove(os.path.join(output_folder, f))
+    if stale:
+        print(f"Removed {len(stale):,} cluster files from a previous run in {output_folder}", flush=True)
+
 def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, output_folder, probe_file=None, max_clusters=0, clussize_thresh=0, clussize_window=20):
     print("Beginning clustering...")
     
@@ -655,6 +668,8 @@ def cluster_sequences(umis, reads_file_path, aln_thresh, size_thresh, output_fol
             # Backward compatibility: if no orientation info, assume forward
             orientation_map[umi_rec.id] = 'forward'
     
+    _remove_stale_cluster_files(output_folder)
+
     # Normalize sequences to forward orientation when writing cluster files
     print("Writing cluster files with orientation normalization...")
     count = 0
@@ -753,6 +768,7 @@ def parse_cdhit_clusters(clstr_file):
 def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size_thresh, reads_file_path, probe_file=None):
     """Run CD-HIT clustering on UMI sequences."""
     print(f"Running CD-HIT clustering with {identity_threshold:.2f} identity threshold...", flush=True)
+    _remove_stale_cluster_files(output_folder)
     
     # Load orientation information from UMI file (stored during extraction)
     print("Reading orientation information from UMI records...", flush=True)
@@ -777,6 +793,7 @@ def run_cdhit_clustering(input_umi_file, output_folder, identity_threshold, size
         '-o', cdhit_output,
         '-c', str(identity_threshold),
         '-n', '8',  # word size for 90% identity
+        '-r', '0',  # UMIs are already in forward orientation; don't match reverse complements
         '-d', '0',  # full sequence ID in output
         '-M', '0',  # unlimited memory
         '-T', str(threads)
