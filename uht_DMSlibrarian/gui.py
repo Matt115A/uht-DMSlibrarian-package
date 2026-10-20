@@ -267,6 +267,7 @@ def run_pipeline_with_progress(
 def run_ngs_with_progress(
     pools_dir, consensus_dir, variants_dir, ngs_probe_file, ngs_reference_file,
     ngs_output, ngs_umi_len, ngs_umi_loc, ngs_umi_mismatches, left_ignore, right_ignore,
+    pear_yolo=False, pear_min_overlap=None,
     progress=gr.Progress()
 ):
     """Run NGS counting with progress tracking."""
@@ -290,6 +291,9 @@ def run_ngs_with_progress(
                 ReferenceManager(reference_path),
                 _num(left_ignore, 22),
                 _num(right_ignore, 24),
+                # Same rule as the CLI: an empty overlap means 20, or 1 with PEAR yolo
+                pear_min_overlap=_num(pear_min_overlap, 1 if pear_yolo else 20),
+                pear_yolo=bool(pear_yolo),
                 umi_mismatches=_num(ngs_umi_mismatches, 0)
             )
         
@@ -318,6 +322,7 @@ def run_fitness_with_progress(
     fitness_input_csv, fitness_output_dir, input_pools, output_pools,
     min_input, aa_filter, error_model, error_model_config_file, fit_error_model,
     error_model_bootstraps, single_rep_mode, report_html, report_html_path, random_seed,
+    pseudocount=None,
     progress=gr.Progress()
 ):
     """Run fitness analysis with progress tracking."""
@@ -356,6 +361,7 @@ def run_fitness_with_progress(
                 bool(report_html),
                 report_html_path if report_html_path else None,
                 _num(random_seed, 42),
+                pseudocount=_num(pseudocount, 1e-10, float),
             )
         
         output_text = output_capture.getvalue()
@@ -665,6 +671,21 @@ def create_interface():
                             precision=0,
                             info="Bases to ignore from end of assembled read (default: 24)"
                         )
+
+                with gr.Accordion("PEAR Read Merging", open=False):
+                    with gr.Row():
+                        ngs_pear_yolo = gr.Checkbox(
+                            label="PEAR yolo mode",
+                            value=False,
+                            info="Maximally permissive merging: disables the p-value test (-p 1.0); default overlap becomes 1 (same as --pear_yolo)"
+                        )
+                        ngs_pear_min_overlap = gr.Number(
+                            label="PEAR Min Overlap (Optional)",
+                            value=None,
+                            minimum=1,
+                            precision=0,
+                            info="Minimum read overlap for merging. Empty: 20, or 1 in yolo mode (same as --pear_min_overlap)"
+                        )
                 
                 ngs_auto_populate_btn = gr.Button("Auto-populate from Pipeline", variant="secondary")
                 ngs_run_btn = gr.Button("Run NGS Counting", variant="primary", size="lg")
@@ -699,7 +720,8 @@ def create_interface():
                         ngs_variants_dir, ngs_probe_file,
                         ngs_reference_file, ngs_output,
                         ngs_umi_len, ngs_umi_loc, ngs_umi_mismatches,
-                        ngs_left_ignore, ngs_right_ignore
+                        ngs_left_ignore, ngs_right_ignore,
+                        ngs_pear_yolo, ngs_pear_min_overlap
                     ],
                     outputs=[
                         ngs_status, ngs_progress_text,
@@ -752,6 +774,12 @@ def create_interface():
                             label="Amino Acid Filter (Optional)",
                             placeholder="S",
                             info="Filter mutability plot to specific amino acid (e.g., 'S' for serine, 'P' for proline, '*' for stop codons)"
+                        )
+                        fitness_pseudocount = gr.Number(
+                            label="Pseudocount",
+                            value=1e-10,
+                            minimum=0,
+                            info="Added to relative frequencies before the log ratio (default 1e-10). 0: replicates with a zero count are left out of the average (same as --pseudocount)"
                         )
 
                 with gr.Accordion("Error Model", open=False):
@@ -829,7 +857,8 @@ def create_interface():
                         fitness_min_input, fitness_aa_filter,
                         fitness_error_model, fitness_error_model_config, fitness_fit_error_model,
                         fitness_error_model_bootstraps, fitness_single_rep_mode,
-                        fitness_report_html, fitness_report_html_path, fitness_random_seed
+                        fitness_report_html, fitness_report_html_path, fitness_random_seed,
+                        fitness_pseudocount
                     ],
                     outputs=[
                         fitness_status, fitness_progress_text,
