@@ -104,8 +104,14 @@ def hamming_distance(a: str, b: str, max_mismatches: int) -> int:
 def find_umi_with_mismatches(query: str, umi_list: List[str],
                              block_index: Dict[Tuple[int, str], List[int]],
                              block_ranges: List[Tuple[int, int]],
-                             max_mismatches: int) -> Optional[int]:
-    """Return index of best matching UMI within max_mismatches or None."""
+                             max_mismatches: int,
+                             cons_list: Optional[List[str]] = None,
+                             genotypes: Optional[Dict[str, object]] = None) -> Optional[int]:
+    """Return index of best matching UMI within max_mismatches or None.
+
+    With cons_list and genotypes, returns -1 if equally good matches belong to
+    consensuses with different genotypes (an ambiguous read).
+    """
     if not block_ranges:
         return None
     candidates = set()
@@ -117,14 +123,25 @@ def find_umi_with_mismatches(query: str, umi_list: List[str],
         return None
     best_idx = None
     best_mismatches = max_mismatches + 1
-    for idx in candidates:
+    best_genotypes = set()
+    for idx in sorted(candidates):
         cand = umi_list[idx]
         mismatches = hamming_distance(query, cand, max_mismatches)
-        if mismatches <= max_mismatches and mismatches < best_mismatches:
+        if mismatches > max_mismatches:
+            continue
+        genotype = None
+        if cons_list is not None:
+            name = cons_list[idx]
+            genotype = AMBIGUOUS if name is AMBIGUOUS else (genotypes or {}).get(name, name)
+        if mismatches < best_mismatches:
             best_mismatches = mismatches
             best_idx = idx
-            if best_mismatches == 0:
-                break
+            best_genotypes = {genotype}
+        elif mismatches == best_mismatches:
+            best_genotypes.add(genotype)
+    if best_idx is not None and cons_list is not None and (
+            len(best_genotypes) > 1 or AMBIGUOUS in best_genotypes):
+        return -1
     return best_idx
 
 
@@ -233,12 +250,32 @@ def load_consensus_fasta(consensus_dir: str) -> Dict[str, str]:
     return cons
 
 
-def build_umi_index(consensus_map: Dict[str, str], umi_len: int) -> Dict[str, str]:
+# Index value for a UMI-length sequence found in consensuses with different
+# genotypes: reads carrying it cannot be assigned and are counted as ambiguous.
+AMBIGUOUS = ''
+
+
+def build_umi_index(consensus_map: Dict[str, str], umi_len: int,
+                    genotypes: Optional[Dict[str, object]] = None) -> Dict[str, str]:
     """Build mapping from UMI (exact) to consensus name.
-    If collisions occur, keep the first seen (deterministic by os.listdir order).
     Index is built from circular sequences on both strands.
+
+    If several consensuses contain the same sequence (e.g. one molecule split
+    into two clusters), the first one seen keeps it when their genotypes agree,
+    since the reads then count towards the same variant either way. If the
+    genotypes differ (given `genotypes`: consensus name -> genotype key), the
+    sequence is marked AMBIGUOUS instead of going to whichever came first.
     """
     idx: Dict[str, str] = {}
+
+    def add(umi: str, name: str) -> None:
+        other = idx.get(umi)
+        if other is None:
+            idx[umi] = name
+        elif (genotypes is not None and other is not AMBIGUOUS and other != name
+              and genotypes.get(other) != genotypes.get(name)):
+            idx[umi] = AMBIGUOUS
+
     total = len(consensus_map)
     for count, (name, seq) in enumerate(consensus_map.items()):
         if count > 0 and count % 1000 == 0:
@@ -254,13 +291,13 @@ def build_umi_index(consensus_map: Dict[str, str], umi_len: int) -> Dict[str, st
         # forward
         for i in range(L):
             umi = seq_circ[i:i+umi_len]
-            if len(umi) == umi_len and umi not in idx:
-                idx[umi] = name
+            if len(umi) == umi_len:
+                add(umi, name)
         # reverse
         for i in range(L):
             umi = seq_rc_circ[i:i+umi_len]
-            if len(umi) == umi_len and umi not in idx:
-                idx[umi] = name
+            if len(umi) == umi_len:
+                add(umi, name)
     return idx
 
 
@@ -664,9 +701,25 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         if umi_mismatches >= umi_len:
             raise ValueError("umi_mismatches must be less than umi_len")
 
+        # Determine reference mode
+        is_multi_ref = (ReferenceManager is not None and
+                       isinstance(reference_fasta_or_manager, ReferenceManager))
+        if is_multi_ref:
+            ref_seq_or_manager = reference_fasta_or_manager
+        else:
+            ref_seq_or_manager = str(SeqIO.read(reference_fasta_or_manager, "fasta").seq).upper()
+
+        # Genotype of each consensus, used to tell harmless duplicate clusters
+        # (same genotype) from conflicting ones when they share a UMI
+        print("Annotating consensus genotypes...", flush=True)
+        hap_rows, hap_index = collect_haplotype_rows(variants_dir, ref_seq_or_manager)
+        genotypes = {name: (ref_id, aa_muts) for name, _muts, aa_muts, ref_id in hap_rows}
+
         print("Building UMI index (circular, both strands)...", flush=True)
-        umi_index = build_umi_index(consensus, umi_len)
-        print(f"Index contains {len(umi_index)} unique UMIs", flush=True)
+        umi_index = build_umi_index(consensus, umi_len, genotypes)
+        n_ambiguous_keys = sum(1 for v in umi_index.values() if v is AMBIGUOUS)
+        print(f"Index contains {len(umi_index)} unique UMIs "
+              f"({n_ambiguous_keys:,} shared by consensuses with different genotypes)", flush=True)
         if umi_mismatches > 0:
             print(f"UMI mismatch tolerance: {umi_mismatches}", flush=True)
             umi_list = list(umi_index.keys())
@@ -683,21 +736,10 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         var_rows, per_consensus = collect_all_variant_rows(variants_dir)
         print(f"Found {len(var_rows)} unique variant rows across {len(per_consensus)} consensus", flush=True)
 
-        # Determine reference mode
-        is_multi_ref = (ReferenceManager is not None and
-                       isinstance(reference_fasta_or_manager, ReferenceManager))
-
         if is_multi_ref:
-            ref_manager = reference_fasta_or_manager
-            print("Loading references (multi-reference mode)...", flush=True)
-            print(ref_manager.get_reference_info(), flush=True)
-            ref_seq_or_manager = ref_manager
+            print(reference_fasta_or_manager.get_reference_info(), flush=True)
         else:
-            print("Loading reference sequence...", flush=True)
-            ref_record = SeqIO.read(reference_fasta_or_manager, "fasta")
-            ref_seq = str(ref_record.seq)
-            print(f"Reference length: {len(ref_seq)} bp", flush=True)
-            ref_seq_or_manager = ref_seq
+            print(f"Reference length: {len(ref_seq_or_manager)} bp", flush=True)
 
         print(f"Finding pool folders in: {pools_dir}", flush=True)
         pool_folders = find_pool_folders(pools_dir)
@@ -710,9 +752,21 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
 
     counts = [[0 for _ in pool_folders] for _ in range(len(var_rows))]
     # Haplotype rows (consensus-level, preserve multi-mutations)
-    hap_rows, hap_index = collect_haplotype_rows(variants_dir, ref_seq_or_manager)
     hap_counts = [[0 for _ in pool_folders] for _ in range(len(hap_rows))]
-    metrics = {"pools": [], "global_read_count": 0, "global_umi_extracted": 0, "global_umi_matched": 0}
+    metrics = {"pools": [], "global_read_count": 0, "global_umi_extracted": 0, "global_umi_matched": 0,
+               "global_umi_ambiguous": 0}
+
+    def match_umi(umi: str) -> Optional[str]:
+        """Consensus name for a read's UMI, AMBIGUOUS, or None if unmatched."""
+        cons_name = umi_index.get(umi)
+        if cons_name is None and umi_mismatches > 0:
+            idx = find_umi_with_mismatches(umi, umi_list, block_index, block_ranges, umi_mismatches,
+                                           cons_list, genotypes)
+            if idx == -1:
+                return AMBIGUOUS
+            if idx is not None:
+                cons_name = cons_list[idx]
+        return cons_name
 
     for j, pool in enumerate(pool_folders):
         pool_name = pool_names[j]
@@ -730,6 +784,7 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
         pool_read_count = 0
         pool_umi_extracted = 0
         pool_umi_matched = 0
+        pool_umi_ambiguous = 0
         
         for pair_idx, (r1, r2) in enumerate(pairs):
             pair_name = Path(r1).stem.replace('_R1', '').replace('R1', '')
@@ -744,11 +799,29 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
             prefix = os.path.join(pool, f"{pool_name}_pair{pair_idx+1}")
             assembled_fastq = prefix + '.assembled.fastq'
             
-            # Check if PEAR output already exists
-            if os.path.exists(assembled_fastq):
+            # Reuse PEAR output only if a finished run with the same inputs and
+            # settings wrote it (the parameter record is written after PEAR
+            # completes, so interrupted runs and changed settings are redone)
+            pear_params = {
+                'r1': os.path.basename(r1), 'r1_size': os.path.getsize(r1),
+                'r2': os.path.basename(r2), 'r2_size': os.path.getsize(r2),
+                'q': 20, 'v': pear_min_overlap, 'p': 1.0 if pear_yolo else None,
+            }
+            params_file = prefix + '.pear_params.json'
+            previous_params = None
+            if os.path.exists(params_file):
+                try:
+                    with open(params_file) as pf:
+                        previous_params = json.load(pf)
+                except (OSError, ValueError):
+                    previous_params = None
+            if os.path.exists(assembled_fastq) and previous_params == pear_params:
                 print("    Using existing PEAR output...", flush=True)
             else:
-                # Run PEAR if output doesn't exist
+                if os.path.exists(params_file):
+                    os.remove(params_file)
+                if os.path.exists(assembled_fastq):
+                    print("    Existing PEAR output is incomplete or used other settings; re-running PEAR", flush=True)
                 try:
                     print("    Merging with PEAR...", flush=True)
                     cmd = [
@@ -763,7 +836,10 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
                         cmd.extend(['-p', '1.0'])
                         print("    (YOLO mode: p-value test disabled)", flush=True)
                     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                    if not os.path.exists(assembled_fastq):
+                    if os.path.exists(assembled_fastq):
+                        with open(params_file, 'w') as pf:
+                            json.dump(pear_params, pf)
+                    else:
                         print("    WARNING: PEAR did not produce assembled reads; falling back to on-the-fly merge")
                         assembled_fastq = ''
                 except Exception as e:
@@ -773,6 +849,7 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
             read_count = 0
             umi_extracted = 0
             umi_matched = 0
+            umi_ambiguous = 0
 
             if assembled_fastq:
                 print("    Scanning assembled reads for UMI matches...", flush=True)
@@ -784,12 +861,11 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
                     if not umi:
                         continue
                     umi_extracted += 1
-                    cons_name = umi_index.get(umi)
-                    if not cons_name and umi_mismatches > 0:
-                        idx = find_umi_with_mismatches(umi, umi_list, block_index, block_ranges, umi_mismatches)
-                        if idx is not None:
-                            cons_name = cons_list[idx]
-                    if not cons_name:
+                    cons_name = match_umi(umi)
+                    if cons_name is None:
+                        continue
+                    if cons_name is AMBIGUOUS:
+                        umi_ambiguous += 1
                         continue
                     umi_matched += 1
                     idxs = per_consensus.get(cons_name, [])
@@ -812,12 +888,11 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
                     if not umi:
                         continue
                     umi_extracted += 1
-                    cons_name = umi_index.get(umi)
-                    if not cons_name and umi_mismatches > 0:
-                        idx = find_umi_with_mismatches(umi, umi_list, block_index, block_ranges, umi_mismatches)
-                        if idx is not None:
-                            cons_name = cons_list[idx]
-                    if not cons_name:
+                    cons_name = match_umi(umi)
+                    if cons_name is None:
+                        continue
+                    if cons_name is AMBIGUOUS:
+                        umi_ambiguous += 1
                         continue
                     umi_matched += 1
                     idxs = per_consensus.get(cons_name, [])
@@ -829,23 +904,27 @@ def run_ngs_count(pools_dir: str, consensus_dir: str, variants_dir: str, probe_f
             pool_read_count += read_count
             pool_umi_extracted += umi_extracted
             pool_umi_matched += umi_matched
+            pool_umi_ambiguous += umi_ambiguous
             
             if len(pairs) > 1:
                 print(f"\n    Pair {pair_idx+1} summary: {read_count:,} reads, {umi_extracted:,} UMIs extracted, {umi_matched:,} matched")
 
-        print(f"\n  Pool {pool_name} total: {pool_read_count:,} reads, {pool_umi_extracted:,} UMIs extracted, {pool_umi_matched:,} matched to consensus")
+        print(f"\n  Pool {pool_name} total: {pool_read_count:,} reads, {pool_umi_extracted:,} UMIs extracted, {pool_umi_matched:,} matched to consensus, "
+              f"{pool_umi_ambiguous:,} ambiguous (UMI shared by consensuses with different genotypes; not counted)")
         metrics["pools"].append(
             {
                 "pool_name": pool_name,
                 "read_count": int(pool_read_count),
                 "umi_extracted": int(pool_umi_extracted),
                 "umi_matched": int(pool_umi_matched),
+                "umi_ambiguous": int(pool_umi_ambiguous),
                 "match_rate": float(pool_umi_matched / pool_umi_extracted) if pool_umi_extracted > 0 else 0.0,
             }
         )
         metrics["global_read_count"] += int(pool_read_count)
         metrics["global_umi_extracted"] += int(pool_umi_extracted)
         metrics["global_umi_matched"] += int(pool_umi_matched)
+        metrics["global_umi_ambiguous"] += int(pool_umi_ambiguous)
 
     print(f"\nWriting output to: {output_csv}")
     with open(output_csv, 'w') as out:

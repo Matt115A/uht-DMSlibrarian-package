@@ -1118,7 +1118,7 @@ Examples:
     ngs_parser.add_argument('--output', required=True, help='Output counts CSV file')
     ngs_parser.add_argument('--left_ignore', type=int, default=22, help='Bases to ignore from start of assembled read (default: 22)')
     ngs_parser.add_argument('--right_ignore', type=int, default=24, help='Bases to ignore from end of assembled read (default: 24)')
-    ngs_parser.add_argument('--pear_min_overlap', type=int, default=20, help='Minimum overlap length for PEAR read merging (default: 20)')
+    ngs_parser.add_argument('--pear_min_overlap', type=int, default=None, help='Minimum overlap length for PEAR read merging (default: 20, or 1 with --pear_yolo)')
     ngs_parser.add_argument('--pear_yolo', action='store_true', help='Maximally permissive PEAR: disables p-value test (-p 1.0) and sets min overlap to 1 unless --pear_min_overlap is specified')
 
     # Fitness analysis command
@@ -1197,8 +1197,8 @@ Examples:
 
         # Handle pear_yolo: if enabled and user didn't specify overlap, use 1
         pear_overlap = args.pear_min_overlap
-        if args.pear_yolo and args.pear_min_overlap == 20:  # 20 is the default
-            pear_overlap = 1
+        if pear_overlap is None:
+            pear_overlap = 1 if args.pear_yolo else 20
 
         success = ngs_count.run_ngs_count(
             args.pools_dir,
