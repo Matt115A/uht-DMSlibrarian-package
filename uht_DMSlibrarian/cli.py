@@ -1143,6 +1143,7 @@ Examples:
     fitness_parser.add_argument('--shrinkage', type=str, default='none', choices=['none', 'normal_prior'], help='Optional fitness shrinkage mode (default: none)')
     fitness_parser.add_argument('--shrinkage_prior_mean', type=float, default=0.0, help='Prior mean for shrinkage if mode is normal_prior (default: 0.0)')
     fitness_parser.add_argument('--shrinkage_prior_var', type=float, default=1.0, help='Prior variance for shrinkage if mode is normal_prior (default: 1.0)')
+    fitness_parser.add_argument('--pseudocount', '--pseudocounts', dest='pseudocount', type=float, default=1e-10, help='Pseudocount added to relative frequencies before the log-ratio fitness calculation (default: 1e-10). With 0, replicates with a zero count are left out of the average')
     
     # GUI command
     gui_parser = subparsers.add_parser('gui', help='Launch interactive web-based GUI')
@@ -1240,6 +1241,7 @@ Examples:
             args.shrinkage,
             args.shrinkage_prior_mean,
             args.shrinkage_prior_var,
+            pseudocount=args.pseudocount,
         )
     elif args.command == 'gui':
         try:

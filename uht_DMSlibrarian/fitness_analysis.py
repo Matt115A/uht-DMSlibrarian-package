@@ -117,6 +117,7 @@ def run_fitness_analysis(
     shrinkage: str = "none",
     shrinkage_prior_mean: float = 0.0,
     shrinkage_prior_var: float = 1.0,
+    pseudocount: float = 1e-10,
 ) -> bool:
     """
     Run fitness analysis on merged counts CSV.
@@ -129,6 +130,9 @@ def run_fitness_analysis(
         min_input: Minimum count threshold in input pools
         aa_filter: Optional amino acid to filter mutability plot (e.g., 'S')
         group_by_reference: If True, generate separate plots per reference template
+        pseudocount: Added to relative frequencies before the log ratio
+                     (default 1e-10). With 0, a replicate with zero input or
+                     output reads is undefined (NaN) and left out of fitness_avg.
     """
     try:
         print("=" * 60)
@@ -145,6 +149,10 @@ def run_fitness_analysis(
         print(f"Min input threshold: {min_input}")
         print(f"Group by reference: {group_by_reference}")
         print(f"Error model: {error_model}")
+        print(f"Pseudocount: {pseudocount}")
+        if pseudocount < 0:
+            print(f"ERROR: pseudocount must be >= 0, got {pseudocount}")
+            return False
 
         # Load data
         print(f"\nLoading data from: {input_csv}")
@@ -200,13 +208,20 @@ def run_fitness_analysis(
         for i, (in_pool, out_pool) in enumerate(zip(input_pools, output_pools)):
             rel_in = df_filtered[f'rel_{in_pool}']
             rel_out = df_filtered[f'rel_{out_pool}']
-            # Avoid log(0) by adding small epsilon
-            epsilon = 1e-10
-            ratio = (rel_out + epsilon) / (rel_in + epsilon)
             fitness_col = f'fitness_{i+1}'
-            df_filtered[fitness_col] = np.log(ratio)
+            if pseudocount == 0:
+                # Without a pseudocount a zero count gives an undefined log ratio
+                valid = (rel_in > 0) & (rel_out > 0)
+                df_filtered[fitness_col] = np.nan
+                df_filtered.loc[valid, fitness_col] = np.log(rel_out[valid] / rel_in[valid])
+                n_undefined = int((~valid).sum())
+                note = f" ({n_undefined} undefined, left blank)" if n_undefined else ""
+            else:
+                ratio = (rel_out + pseudocount) / (rel_in + pseudocount)
+                df_filtered[fitness_col] = np.log(ratio)
+                note = ""
             fitness_cols.append(fitness_col)
-            print(f"  {in_pool} -> {out_pool}: {fitness_col}")
+            print(f"  {in_pool} -> {out_pool}: {fitness_col}{note}")
         
         # Calculate average fitness across all pairs
         df_filtered['fitness_avg'] = df_filtered[fitness_cols].mean(axis=1)
@@ -632,8 +647,8 @@ def plot_mutability(
         muts = row['mutations_parsed']
         if len(muts) == 1:
             wt, pos, mut = muts[0]
-            # Filter by mutant amino acid (not wild-type)
-            if aa_filter is None or mut == aa_filter:
+            # Filter by mutant amino acid (not wild-type); skip undefined fitness
+            if (aa_filter is None or mut == aa_filter) and pd.notna(row[fitness_col]):
                 positions.append(pos)
                 fitnesses.append(row[fitness_col])
                 wt_aas.append(wt)
@@ -711,7 +726,7 @@ def plot_epistasis_single_double(
     single_index = {}
     for _, row in singles.iterrows():
         aa_mut_str = row['AA_MUTATIONS']
-        if aa_mut_str != 'WT':
+        if aa_mut_str != 'WT' and pd.notna(row[fitness_col]):
             single_index[aa_mut_str] = row[fitness_col]
     
     # For each double mutant, check if both constituent singles exist
@@ -721,7 +736,7 @@ def plot_epistasis_single_double(
     
     for _, row in doubles.iterrows():
         muts = row['mutations_parsed']
-        if len(muts) == 2:
+        if len(muts) == 2 and pd.notna(row[fitness_col]):
             (wt1, pos1, mut1), (wt2, pos2, mut2) = muts
             # Skip if either mutation is a stop codon
             if mut1 == '*' or mut2 == '*':
@@ -1010,6 +1025,8 @@ def plot_substitution_matrix(
     for _, row in sub_df.iterrows():
         muts = row['mutations_parsed']
         fitness = row[fitness_col]
+        if pd.isna(fitness):
+            continue  # undefined (e.g. zero counts with --pseudocount 0)
         
         for wt, pos, mut in muts:
             # Skip if either is not a standard amino acid or stop
@@ -1173,6 +1190,10 @@ Examples:
                        help='Prior mean for shrinkage when --shrinkage normal_prior (default: 0.0)')
     parser.add_argument('--shrinkage_prior_var', type=float, default=1.0,
                        help='Prior variance for shrinkage when --shrinkage normal_prior (default: 1.0)')
+    parser.add_argument('--pseudocount', '--pseudocounts', dest='pseudocount', type=float, default=1e-10,
+                       help='Pseudocount added to relative frequencies before the log-ratio fitness '
+                            'calculation (default: 1e-10). With 0, replicates with a zero count are '
+                            'left out of the average')
 
     args = parser.parse_args()
 
@@ -1197,6 +1218,7 @@ Examples:
         args.shrinkage,
         args.shrinkage_prior_mean,
         args.shrinkage_prior_var,
+        pseudocount=args.pseudocount,
     )
     
     sys.exit(0 if success else 1)

@@ -257,6 +257,7 @@ umic-seq-pacbio fitness \
 - `--output_pools`: Space-separated list of output pool names, paired with inputs (e.g., `pool3 pool4`)
 - `--min_input` (default: 10): Minimum count threshold in input pools; variants below this in any input are filtered out
 - `--aa_filter` (optional): Filter mutability plot to specific mutant amino acid (e.g., `S` for serine, `P` for proline, `*` for stop codons)
+- `--pseudocount` (default: `1e-10`): Added to relative frequencies before the log-ratio fitness calculation. With `0`, a replicate with zero input or output reads is undefined: its `fitness_N` is left blank and `fitness_avg` is the mean of the remaining replicates (`--pseudocounts` is accepted as an alias)
 - `--group_by_reference` (optional): Generate separate plots and analysis per reference template. Requires `REFERENCE_ID` column in input (created automatically when using multi-reference mode)
 - `--error_model` (default: `bootstrap`): Error model for uncertainty (`bootstrap`, `dimsum_analog`, `droplet_full`)
   - `droplet_full` uses a mechanistic droplet-stage decomposition (library, prep/PCR, sorting, dictionary, sequencing, residual)
