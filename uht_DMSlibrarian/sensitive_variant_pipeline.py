@@ -46,7 +46,7 @@ def extract_variants_from_sam(sam_file, reference_file_or_seq, output_vcf,
         # Read reference sequence from file
         with open(reference_file_or_seq, 'r') as f:
             ref_lines = [line.strip() for line in f if not line.startswith('>')]
-            ref_seq = ''.join(ref_lines)
+            ref_seq = ''.join(ref_lines).upper()
     else:
         # Use directly as sequence
         ref_seq = reference_file_or_seq
@@ -219,8 +219,12 @@ def realign_partial_globally(consensus_file, ref_seq, vcf_file, reference_id=Non
     aligner.mismatch_score = -3
     aligner.open_gap_score = -6
     aligner.extend_gap_score = -1
-    aligner.query_end_gap_score = 0    # consensus flanks around the gene are free
-    aligner.target_end_gap_score = -6  # unaligned gene ends are penalised
+    try:  # Biopython >= 1.86 names
+        aligner.end_deletion_score = 0     # consensus flanks around the gene are free
+        aligner.end_insertion_score = -6   # unaligned gene ends are penalised
+    except AttributeError:
+        aligner.query_end_gap_score = 0
+        aligner.target_end_gap_score = -6
 
     best = None
     for seq in (cons, str(Seq(cons).reverse_complement())):
@@ -272,6 +276,40 @@ def realign_partial_globally(consensus_file, ref_seq, vcf_file, reference_id=Non
             f.write(f"{chrom}\t{pos}\t.\t{r}\t{a}\t30\tPASS\t{info}\tGT:AD:DP\t1/1:0,1:1\n")
     return len(variants)
 
+def _vcf_is_complete(vcf_file):
+    """True if a VCF was fully written (it has the #CHROM column header)."""
+    try:
+        with open(vcf_file) as f:
+            return any(line.startswith('#CHROM') for line in f)
+    except OSError:
+        return False
+
+
+def is_vcf_up_to_date(vcf_file, consensus_file):
+    """A VCF can be reused only if it is complete and not older than its consensus."""
+    return (os.path.exists(vcf_file)
+            and _vcf_is_complete(vcf_file)
+            and os.path.getmtime(vcf_file) >= os.path.getmtime(consensus_file))
+
+
+def _write_absent_vcf(vcf_file, reference_id):
+    """VCF for a consensus that matches no reference (e.g. an insert-less plasmid)."""
+    with open(vcf_file, 'w') as f:
+        f.write("##fileformat=VCFv4.2\n")
+        f.write(f"##reference={reference_id}\n")
+        f.write("##gene_status=ABSENT\n")
+        f.write("##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n")
+        f.write("##INFO=<ID=REFERENCE_ID,Number=1,Type=String,Description=\"Reference template ID\">\n")
+        f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n")
+
+
+def _run_minimap2(reference_fasta, consensus_file, sam_file):
+    minimap2_cmd = ["minimap2", "-ax", "map-ont", "-t", "1", reference_fasta, consensus_file]
+    with open(sam_file, 'w') as sam_out:
+        subprocess.run(minimap2_cmd, check=True, stdout=sam_out,
+                       stderr=subprocess.PIPE, text=True)
+
+
 def align_and_call_variants_sensitive(consensus_file, reference_file_or_manager, output_dir):
     """
     Align consensus to reference and call ALL variants using sensitive method.
@@ -286,125 +324,69 @@ def align_and_call_variants_sensitive(consensus_file, reference_file_or_manager,
         VCF file path on success, or error message string on failure.
         In multi-ref mode, also stores reference_id in the VCF INFO field.
     """
+    consensus_name = Path(consensus_file).stem
+    vcf_file = os.path.join(output_dir, f"{consensus_name}.vcf")
+    # Write to a temporary name and rename when done, so an interrupted run
+    # never leaves a truncated VCF that a rerun would reuse.
+    partial_vcf = vcf_file + ".partial"
+    sam_file = os.path.join(output_dir, f"{consensus_name}.sam")
+    ref_temp_file = None
     try:
-        consensus_name = Path(consensus_file).stem
-        vcf_file = os.path.join(output_dir, f"{consensus_name}.vcf")
-
-        # Skip if VCF already exists
-        if os.path.exists(vcf_file):
+        # Reuse a finished VCF; redo missing, truncated or stale ones
+        if is_vcf_up_to_date(vcf_file, consensus_file):
             return vcf_file
+        if os.path.exists(vcf_file):
+            os.remove(vcf_file)
+
+        with open(consensus_file, 'r') as f:
+            consensus_seq = ''.join(line.strip() for line in f if not line.startswith('>'))
+        # An empty consensus means consensus generation failed; the genotype is
+        # unknown, so don't report it as WT or as gene-absent.
+        if not consensus_seq:
+            return f"Empty consensus for {consensus_name} (consensus generation failed)"
 
         # Determine reference mode
         is_multi_ref = (ReferenceManager is not None and
                        isinstance(reference_file_or_manager, ReferenceManager))
 
-        # Multi-reference mode: identify best reference first
         if is_multi_ref:
             ref_manager = reference_file_or_manager
-            # Read consensus sequence for reference identification
-            with open(consensus_file, 'r') as f:
-                lines = [line.strip() for line in f if not line.startswith('>')]
-                consensus_seq = ''.join(lines)
-
-            # Identify best matching reference
             best_ref_id, score, is_ambiguous = ref_manager.identify_best_reference(consensus_seq)
 
             if best_ref_id == "UNASSIGNED":
-                return f"No good reference match for {consensus_name} (score: {score})"
-
-            # Get the reference sequence for this consensus
-            ref_seq = ref_manager.get_reference_sequence(best_ref_id)
-
-            # Create temp reference file for minimap2
-            ref_temp_file = ref_manager.get_reference_file(best_ref_id)
-            try:
-                # Step 1: Align consensus to identified reference using minimap2
-                sam_file = os.path.join(output_dir, f"{consensus_name}.sam")
-
-                minimap2_cmd = [
-                    "minimap2",
-                    "-ax", "map-ont",
-                    "-t", "1",
-                    ref_temp_file,
-                    consensus_file
-                ]
-
-                with open(sam_file, 'w') as sam_out:
-                    subprocess.run(minimap2_cmd, check=True, stdout=sam_out,
-                                 stderr=subprocess.PIPE, text=True)
-
-                # Step 2: Extract variants - pass reference sequence and ID directly
-                variant_count = extract_variants_from_sam(
-                    sam_file, ref_seq, vcf_file, reference_id=best_ref_id
-                )
-                if _read_gene_status(vcf_file) == 'PARTIAL':
-                    variant_count = realign_partial_globally(
-                        consensus_file, ref_seq, vcf_file, reference_id=best_ref_id
-                    )
-
-                # Clean up intermediate files
-                os.remove(sam_file)
-
-            finally:
-                # Clean up temp reference file
-                if ref_temp_file and os.path.exists(ref_temp_file):
-                    os.remove(ref_temp_file)
-
-            # FIX: the VCF already carries ##reference and ##gene_status. The old
-            # WT placeholder overwrote it, turning gene-absent consensuses into WT.
-
-            return vcf_file
-
+                # Matches no reference, e.g. an insert-less plasmid: report it as
+                # gene-absent instead of dropping it.
+                _write_absent_vcf(partial_vcf, "UNASSIGNED")
+            else:
+                ref_seq = ref_manager.get_reference_sequence(best_ref_id)
+                ref_temp_file = ref_manager.get_reference_file(best_ref_id)
+                _run_minimap2(ref_temp_file, consensus_file, sam_file)
+                extract_variants_from_sam(sam_file, ref_seq, partial_vcf, reference_id=best_ref_id)
+                if _read_gene_status(partial_vcf) == 'PARTIAL':
+                    realign_partial_globally(consensus_file, ref_seq, partial_vcf, reference_id=best_ref_id)
         else:
             # Single reference mode (backward compatible)
             reference_file = reference_file_or_manager
-
-            # Step 1: Align consensus to reference using minimap2
-            sam_file = os.path.join(output_dir, f"{consensus_name}.sam")
-
-            # Run minimap2 alignment
-            minimap2_cmd = [
-                "minimap2",
-                "-ax", "map-ont",
-                "-t", "1",
-                reference_file,
-                consensus_file
-            ]
-
-            with open(sam_file, 'w') as sam_out:
-                subprocess.run(minimap2_cmd, check=True, stdout=sam_out,
-                             stderr=subprocess.PIPE, text=True)
-
-            # Step 2: Extract variants directly from SAM
-            variant_count = extract_variants_from_sam(sam_file, reference_file, vcf_file)
-            if _read_gene_status(vcf_file) == 'PARTIAL':
+            _run_minimap2(reference_file, consensus_file, sam_file)
+            extract_variants_from_sam(sam_file, reference_file, partial_vcf)
+            if _read_gene_status(partial_vcf) == 'PARTIAL':
                 with open(reference_file) as rf:
                     ref_str = ''.join(l.strip() for l in rf if not l.startswith('>'))
-                variant_count = realign_partial_globally(consensus_file, ref_str, vcf_file)
+                realign_partial_globally(consensus_file, ref_str, partial_vcf)
 
-            # Clean up intermediate files
-            os.remove(sam_file)
-
-            if variant_count == 0:
-                return f"No variants found for {consensus_name}"
-
-            return vcf_file
+        os.replace(partial_vcf, vcf_file)
+        return vcf_file
 
     except Exception as e:
         return f"Error processing {consensus_name}: {str(e)}"
+    finally:
+        for path in (partial_vcf, sam_file, ref_temp_file):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
-
-def _write_empty_vcf_with_ref(vcf_file: str, reference_id: str) -> None:
-    """Write a minimal VCF file with reference info for WT consensus (no variants)."""
-    with open(vcf_file, 'w') as f:
-        f.write("##fileformat=VCFv4.2\n")
-        f.write(f"##reference={reference_id}\n")
-        f.write("##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">\n")
-        f.write("##INFO=<ID=REFERENCE_ID,Number=1,Type=String,Description=\"Reference template ID\">\n")
-        f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n")
-        # Write a single placeholder entry marking this as WT for this reference
-        # Using position 0 as a marker (will be filtered out in downstream processing)
-        f.write(f"{reference_id}\t0\t.\t.\t.\t.\tWT\tREFERENCE_ID={reference_id}\t.\t.\n")
 
 def process_consensus_file_sensitive(consensus_file, reference_file, output_dir):
     """Process a single consensus file to generate VCF using sensitive method."""
@@ -436,8 +418,11 @@ def combine_vcf_files(vcf_dir, output_vcf):
         vcf_files = []
         for file in os.listdir(vcf_dir):
             # Skip hidden files such as macOS AppleDouble '._' files
-            if file.endswith('.vcf') and not file.startswith('.'):
-                vcf_files.append(os.path.join(vcf_dir, file))
+            path = os.path.join(vcf_dir, file)
+            # The combined VCF itself may live in the same folder
+            if (file.endswith('.vcf') and not file.startswith('.')
+                    and os.path.abspath(path) != os.path.abspath(output_vcf)):
+                vcf_files.append(path)
 
         if not vcf_files:
             print("No VCF files found to combine")
@@ -461,6 +446,7 @@ def combine_vcf_files(vcf_dir, output_vcf):
                 try:
                     # Read VCF file and extract variants and reference ID
                     reference_id = None
+                    gene_status = None
                     variants = []
                     is_wt = False
 
@@ -469,6 +455,8 @@ def combine_vcf_files(vcf_dir, output_vcf):
                             if line.startswith('##reference='):
                                 # Extract reference ID from header
                                 reference_id = line.strip().split('=', 1)[1]
+                            elif line.startswith('##gene_status='):
+                                gene_status = line.strip().split('=', 1)[1]
                             elif line.startswith('#') or line.strip() == '':
                                 continue
                             else:
@@ -500,10 +488,14 @@ def combine_vcf_files(vcf_dir, output_vcf):
                         outfile.write(variant + '\n')
 
                     # For WT clusters (no variants), write a WT marker entry
-                    # so the analysis stage knows about this cluster and its reference
-                    if not variants and is_wt and reference_id:
-                        wt_info = f"CLUSTER={cluster_name};REFERENCE_ID={reference_id};WT=true"
-                        outfile.write(f"{reference_id}\t0\t.\t.\t.\t.\tWT\t{wt_info}\n")
+                    # so the analysis stage knows about this cluster and its reference.
+                    # Gene-absent consensuses have no variants either but are not WT.
+                    if not variants and (is_wt or gene_status != 'ABSENT'):
+                        wt_info = f"CLUSTER={cluster_name};"
+                        if reference_id:
+                            wt_info += f"REFERENCE_ID={reference_id};"
+                        wt_info += "WT=true"
+                        outfile.write(f"{reference_id or 'reference'}\t0\t.\t.\t.\t.\tWT\t{wt_info}\n")
 
                 except Exception as e:
                     print(f"Error processing {vcf_file}: {e}")

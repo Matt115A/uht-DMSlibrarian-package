@@ -458,6 +458,18 @@ def run_variant_calling(args, ref_manager=None):
     total_consensus = len(consensus_files)
     print(f"Found {total_consensus:,} consensus files to process\n")
 
+    # Remove VCFs whose consensus no longer exists (left by an earlier run);
+    # they would otherwise be combined and counted as dictionary members.
+    consensus_names = {Path(cf).stem for cf in consensus_files}
+    orphans = [f for f in os.listdir(output_dir)
+               if f.endswith('.vcf') and not f.startswith('.')
+               and f[:-len('.vcf')] not in consensus_names
+               and os.path.abspath(os.path.join(output_dir, f)) != os.path.abspath(combined_vcf)]
+    for f in orphans:
+        os.remove(os.path.join(output_dir, f))
+    if orphans:
+        print(f"Removed {len(orphans):,} VCF files with no matching consensus file (from an earlier run)\n")
+
     # Track progress
     success_count = 0
     failed_count = 0
