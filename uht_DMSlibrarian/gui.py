@@ -232,13 +232,13 @@ def run_pipeline_with_progress(
             base_dir = Path(output_dir)
             if base_dir.exists():
                 output_files.extend([
-                    str(f) for f in base_dir.rglob("*.fasta") if f.is_file()
+                    str(f) for f in base_dir.rglob("*.fasta") if f.is_file() and not f.name.startswith('.')
                 ])
                 output_files.extend([
-                    str(f) for f in base_dir.rglob("*.vcf") if f.is_file()
+                    str(f) for f in base_dir.rglob("*.vcf") if f.is_file() and not f.name.startswith('.')
                 ])
                 output_files.extend([
-                    str(f) for f in base_dir.rglob("*.csv") if f.is_file()
+                    str(f) for f in base_dir.rglob("*.csv") if f.is_file() and not f.name.startswith('.')
                 ])
                 if report_file and os.path.exists(report_file):
                     output_files.append(report_file)
@@ -291,7 +291,7 @@ def run_ngs_with_progress(
             output_files = [ngs_output] if os.path.exists(ngs_output) else []
             output_dir = Path(ngs_output).parent
             if output_dir.exists():
-                output_files.extend([str(f) for f in output_dir.glob("*pool*.csv") if f.is_file()])
+                output_files.extend([str(f) for f in output_dir.glob("*pool*.csv") if f.is_file() and not f.name.startswith('.')])
             
             status = "NGS counting completed successfully!"
             return status, output_text, output_files, create_metrics_plot('ngs')
@@ -356,8 +356,8 @@ def run_fitness_with_progress(
             output_files = []
             output_dir = Path(fitness_output_dir)
             if output_dir.exists():
-                output_files.extend([str(f) for f in output_dir.rglob("*.csv") if f.is_file()])
-                output_files.extend([str(f) for f in output_dir.rglob("*.png") if f.is_file()])
+                output_files.extend([str(f) for f in output_dir.rglob("*.csv") if f.is_file() and not f.name.startswith('.')])
+                output_files.extend([str(f) for f in output_dir.rglob("*.png") if f.is_file() and not f.name.startswith('.')])
             
             status = "Fitness analysis completed successfully!"
             return status, output_text, output_files, create_metrics_plot('fitness')

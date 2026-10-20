@@ -435,7 +435,8 @@ def combine_vcf_files(vcf_dir, output_vcf):
         # Get list of VCF files
         vcf_files = []
         for file in os.listdir(vcf_dir):
-            if file.endswith('.vcf'):
+            # Skip hidden files such as macOS AppleDouble '._' files
+            if file.endswith('.vcf') and not file.startswith('.'):
                 vcf_files.append(os.path.join(vcf_dir, file))
 
         if not vcf_files:
@@ -538,7 +539,8 @@ def main():
     # Get list of consensus files
     consensus_files = []
     for file in os.listdir(consensus_dir):
-        if file.endswith('_consensus.fasta'):
+        # Skip hidden files such as macOS AppleDouble '._' files
+        if file.endswith('_consensus.fasta') and not file.startswith('.'):
             consensus_files.append(os.path.join(consensus_dir, file))
     
     total_consensus = len(consensus_files)

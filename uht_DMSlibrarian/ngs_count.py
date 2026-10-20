@@ -211,7 +211,9 @@ def extract_umi_from_assembled(seq: str, umi_len: int, left_ignore: int, right_i
 
 def load_consensus_fasta(consensus_dir: str) -> Dict[str, str]:
     cons: Dict[str, str] = {}
-    files = [f for f in os.listdir(consensus_dir) if f.endswith('.fasta') or f.endswith('.fa')]
+    # Skip hidden files such as macOS AppleDouble '._' files
+    files = [f for f in os.listdir(consensus_dir)
+             if (f.endswith('.fasta') or f.endswith('.fa')) and not f.startswith('.')]
     total = len(files)
     for idx, fn in enumerate(files):
         if idx % 1000 == 0 and idx > 0:
@@ -378,7 +380,7 @@ def collect_all_variant_rows(variants_dir: str) -> Tuple[List[Tuple[str,int,str,
     unique: Dict[Tuple[str,int,str,str], int] = {}
     per_consensus: Dict[str, List[int]] = {}
     for fn in os.listdir(variants_dir):
-        if not fn.endswith('.vcf'):
+        if not fn.endswith('.vcf') or fn.startswith('.'):
             continue
         name = Path(fn).stem  # matches consensus stem
         vpath = os.path.join(variants_dir, fn)
@@ -430,7 +432,7 @@ def collect_haplotype_rows(variants_dir: str, ref_seq_or_manager) -> Tuple[List[
         ref_sequences = {default_ref_id: Seq(ref_seq)}
 
     for fn in os.listdir(variants_dir):
-        if not fn.endswith('.vcf'):
+        if not fn.endswith('.vcf') or fn.startswith('.'):
             continue
         name = Path(fn).stem
         vpath = os.path.join(variants_dir, fn)
@@ -523,7 +525,7 @@ def collect_haplotype_rows(variants_dir: str, ref_seq_or_manager) -> Tuple[List[
 def find_pool_folders(pools_dir: str) -> List[str]:
     folders = []
     for entry in os.scandir(pools_dir):
-        if entry.is_dir():
+        if entry.is_dir() and not entry.name.startswith('.'):
             folders.append(entry.path)
     folders.sort()
     return folders
@@ -538,7 +540,7 @@ def find_r1_r2_pairs(folder: str) -> List[Tuple[str, str]]:
     r2_files = {}
     
     for fn in os.listdir(folder):
-        if not (fn.endswith('.fastq') or fn.endswith('.fastq.gz')):
+        if not (fn.endswith('.fastq') or fn.endswith('.fastq.gz')) or fn.startswith('.'):
             continue
         
         full_path = os.path.join(folder, fn)

@@ -440,7 +440,8 @@ def run_variant_calling(args, ref_manager=None):
     # Get list of consensus files
     consensus_files = []
     for file in os.listdir(consensus_dir):
-        if file.endswith('_consensus.fasta'):
+        # Skip hidden files such as macOS AppleDouble '._' files
+        if file.endswith('_consensus.fasta') and not file.startswith('.'):
             consensus_files.append(os.path.join(consensus_dir, file))
 
     total_consensus = len(consensus_files)
@@ -643,7 +644,8 @@ def count_files_in_directory(directory, pattern_start="", pattern_end=""):
         count = 0
         if os.path.exists(directory):
             for file in os.listdir(directory):
-                if file.startswith(pattern_start) and file.endswith(pattern_end):
+                if (file.startswith(pattern_start) and file.endswith(pattern_end)
+                        and not file.startswith('.')):
                     count += 1
         return count
     except Exception:
