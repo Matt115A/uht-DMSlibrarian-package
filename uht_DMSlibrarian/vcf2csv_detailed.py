@@ -34,6 +34,9 @@ try:
 except ImportError:
     ReferenceManager = None
 
+# Same amino acid annotation as the fitness table's AA_MUTATIONS
+from .ngs_count import annotate_variants, _indel_events
+
 
 class ValidationError(Exception):
     """Raised when input validation fails."""
@@ -187,6 +190,7 @@ def parse_vcf_combined_streaming(vcf_file):
     """
     cluster_variants = defaultdict(list)
     cluster_reference_ids = {}  # cluster_name -> reference_id
+    absent_clusters = set()     # consensuses that do not contain the gene
 
     # First pass: count total lines for progress bar
     print("Counting variants for progress bar...")
@@ -221,6 +225,7 @@ def parse_vcf_combined_streaming(vcf_file):
             cluster_name = None
             reference_id = None
             is_wt = False
+            is_absent = False
             for info_item in info.split(';'):
                 if info_item.startswith('CLUSTER='):
                     cluster_name = info_item.split('=')[1]
@@ -228,10 +233,14 @@ def parse_vcf_combined_streaming(vcf_file):
                     reference_id = info_item.split('=')[1]
                 elif info_item == 'WT=true':
                     is_wt = True
+                elif info_item == 'GENE_ABSENT=true':
+                    is_absent = True
 
             if cluster_name:
-                # Handle WT marker entries (position 0, no actual variants)
-                if is_wt and pos == 0:
+                # Handle WT / gene-absent marker entries (position 0, no actual variants)
+                if (is_wt or is_absent) and pos == 0:
+                    if is_absent:
+                        absent_clusters.add(cluster_name)
                     # Register WT cluster with empty variant list
                     if cluster_name not in cluster_variants:
                         cluster_variants[cluster_name] = []
@@ -291,10 +300,12 @@ def parse_vcf_combined_streaming(vcf_file):
                 print(progress_line, end='', flush=True)
 
     # Count WT clusters (those with empty variant list)
-    wt_count = sum(1 for variants in cluster_variants.values() if len(variants) == 0)
-    mutant_count = len(cluster_variants) - wt_count
+    wt_count = sum(1 for name, variants in cluster_variants.items()
+                   if len(variants) == 0 and name not in absent_clusters)
+    mutant_count = len(cluster_variants) - wt_count - len(absent_clusters)
 
-    print(f"\nParsed {len(cluster_variants):,} clusters ({mutant_count:,} with variants, {wt_count:,} WT)")
+    print(f"\nParsed {len(cluster_variants):,} clusters ({mutant_count:,} with variants, {wt_count:,} WT, "
+          f"{len(absent_clusters):,} gene-absent)")
 
     # Report reference distribution if multi-reference
     unique_refs = set(cluster_reference_ids.values())
@@ -306,37 +317,98 @@ def parse_vcf_combined_streaming(vcf_file):
         for ref_id, count in sorted(ref_counts.items()):
             print(f"  {ref_id}: {count:,} clusters")
 
-    return cluster_variants, cluster_reference_ids
+    return cluster_variants, cluster_reference_ids, absent_clusters
 
 def apply_variants_to_reference(reference_seq, variants):
-    """Apply variants to reference sequence to create consensus."""
-    # Convert reference to list for easy modification
-    consensus = list(str(reference_seq))
-    
-    # Sort variants by position (descending) to avoid position shifts
-    sorted_variants = sorted(variants, key=lambda x: x['pos'], reverse=True)
-    
-    for variant in sorted_variants:
-        pos = variant['pos'] - 1  # Convert to 0-based indexing
-        ref = variant['ref']
-        alt = variant['alt']
-        
-        # Check if position is valid
-        if pos < 0 or pos >= len(consensus):
+    """Apply SNVs and anchored VCF indels to the reference to rebuild the gene.
+
+    Each record is converted to an edit of the reference: a substitution, a
+    deletion of the bases after the anchor (or before it, for a deletion at
+    base 1), or an insertion after the anchor base. Edits are applied left to
+    right in reference coordinates.
+    """
+    reference_seq = str(reference_seq)
+    edits = []  # (start0, end0, replacement) in reference coordinates
+    for variant in variants:
+        pos, ref, alt = variant['pos'], variant['ref'], variant['alt']
+        start = pos - 1
+        if start < 0 or reference_seq[start:start + len(ref)] != ref:
+            print(f"Warning: Reference mismatch at position {pos}: expected {ref}, "
+                  f"found {reference_seq[start:start + len(ref)]}")
             continue
-        
-        # Check if reference matches
-        if consensus[pos] == ref:
-            consensus[pos] = alt
+        if len(ref) == len(alt):
+            edits.append((start, start + len(ref), alt))
+        elif len(ref) > len(alt):
+            n = len(ref) - len(alt)
+            if ref[0] == alt[0]:  # anchor precedes the deleted bases
+                edits.append((pos, pos + n, ''))
+            else:                 # deletion at base 1, anchored on the next base
+                edits.append((0, n, ''))
         else:
-            print(f"Warning: Reference mismatch at position {pos+1}: expected {ref}, found {consensus[pos]}")
-    
-    return ''.join(consensus)
+            # Insertion after the anchor base (an empty edit at index pos)
+            edits.append((pos, pos, alt[len(ref):]))
+
+    out, cursor = [], 0
+    # Insertions (empty span) sort before a substitution at the same index
+    for start, end, replacement in sorted(edits, key=lambda e: (e[0], e[1] - e[0])):
+        if start < cursor:
+            continue  # overlaps an edit already applied (e.g. SNV inside a deletion)
+        out.append(reference_seq[cursor:start])
+        out.append(replacement)
+        cursor = end
+    out.append(reference_seq[cursor:])
+    return ''.join(out)
+
+
+def _variant_tuples(variants, ref_id):
+    return [(ref_id, v['pos'], v['ref'], v['alt']) for v in variants]
+
+
+def _premature_stop(consensus_protein, reference_protein, net_length_change):
+    """Position (1-based) of a stop codon before the expected one, else None.
+
+    The expected stop is the reference stop, moved by in-frame indels; for
+    frameshifts any stop before the reference stop position counts.
+    """
+    expected = reference_protein.find('*')
+    if expected == -1:
+        expected = len(reference_protein)
+    if net_length_change % 3 == 0:
+        expected += net_length_change // 3
+    first = consensus_protein.find('*')
+    if first != -1 and first < expected:
+        return first + 1
+    return None
+
+
+def _load_references(reference_fasta_or_manager):
+    """Return (ref_sequences, ref_proteins, default_ref_id) for single or multi-reference input."""
+    is_multi_ref = (ReferenceManager is not None and
+                    isinstance(reference_fasta_or_manager, ReferenceManager))
+    if is_multi_ref:
+        ref_manager = reference_fasta_or_manager
+        ref_sequences = {r: ref_manager.get_reference_sequence(r) for r in ref_manager.get_reference_ids()}
+        ref_proteins = {r: ref_manager.get_reference_protein(r) for r in ref_manager.get_reference_ids()}
+        return ref_sequences, ref_proteins, ref_manager.get_default_reference_id()
+    reference_records = list(SeqIO.parse(reference_fasta_or_manager, "fasta"))
+    if not reference_records:
+        raise ValidationError(f"No sequences found in reference file {reference_fasta_or_manager}")
+    reference_seq = str(reference_records[0].seq).upper()
+    default_ref_id = reference_records[0].id
+    return ({default_ref_id: reference_seq},
+            {default_ref_id: translate_dna_to_protein(reference_seq)},
+            default_ref_id)
+
 
 def vcf_to_csv_detailed(vcf_file, reference_fasta_or_manager, output_csv,
                         generate_demultiplexed: bool = True):
     """
     Convert combined VCF to detailed CSV with mutations and analysis using streaming approach.
+
+    Amino acid mutations use the same annotation as ngs_count's AA_MUTATIONS
+    (including frameshift 'fs' and in-frame 'delNaa'/'insNaa' tokens), so this
+    table and the fitness table always agree. Gene-absent consensuses are
+    reported with mutations 'NO_GENE'.
 
     Args:
         vcf_file: Path to combined VCF file
@@ -358,60 +430,29 @@ def vcf_to_csv_detailed(vcf_file, reference_fasta_or_manager, output_csv,
         if missing_cluster_count > 0:
             print(f"  WARNING: {missing_cluster_count} entries missing CLUSTER tag - these will be skipped!")
             print(f"           Ensure VCF was generated by 'umic-seq-pacbio variants' command")
+        ref_sequences, ref_proteins, default_ref_id = _load_references(reference_fasta_or_manager)
     except ValidationError as e:
         print(f"ERROR: {e}")
         return False
 
-    # Determine reference mode
-    is_multi_ref = (ReferenceManager is not None and
-                   isinstance(reference_fasta_or_manager, ReferenceManager))
-
-    if is_multi_ref:
-        ref_manager = reference_fasta_or_manager
-        print(ref_manager.get_reference_info())
-
-        # Build lookup dicts for sequences and proteins
-        ref_sequences: Dict[str, str] = {}
-        ref_proteins: Dict[str, str] = {}
-        for ref_id in ref_manager.get_reference_ids():
-            ref_sequences[ref_id] = ref_manager.get_reference_sequence(ref_id)
-            ref_proteins[ref_id] = ref_manager.get_reference_protein(ref_id)
-
-        default_ref_id = ref_manager.get_default_reference_id()
+    if ReferenceManager is not None and isinstance(reference_fasta_or_manager, ReferenceManager):
+        print(reference_fasta_or_manager.get_reference_info())
     else:
-        # Single reference mode (backward compatible)
-        reference_fasta = reference_fasta_or_manager
-        reference_records = list(SeqIO.parse(reference_fasta, "fasta"))
-        if not reference_records:
-            print(f"Error: No sequences found in reference file {reference_fasta}")
-            return False
-
-        reference_seq = str(reference_records[0].seq)
-        default_ref_id = reference_records[0].id
-
-        ref_sequences = {default_ref_id: reference_seq}
-        ref_proteins = {default_ref_id: translate_dna_to_protein(reference_seq)}
-
-        print(f"Reference sequence: {default_ref_id} (length: {len(reference_seq)})")
-        print(f"Reference protein: {ref_proteins[default_ref_id][:50]}... (length: {len(ref_proteins[default_ref_id])})")
+        print(f"Reference sequence: {default_ref_id} (length: {len(ref_sequences[default_ref_id])})")
 
     # Validate reference consistency
     if vcf_ref_ids:
-        warnings = validate_references(ref_sequences, vcf_ref_ids)
-        for warning in warnings:
+        for warning in validate_references(ref_sequences, vcf_ref_ids):
             print(f"  {warning}")
 
     # Parse VCF and group variants by cluster using streaming
-    cluster_variants, cluster_reference_ids = parse_vcf_combined_streaming(vcf_file)
+    cluster_variants, cluster_reference_ids, absent_clusters = parse_vcf_combined_streaming(vcf_file)
 
-    # Process clusters with progress bar
     total_clusters = len(cluster_variants)
     print(f"\nProcessing {total_clusters:,} clusters...")
-
-    processed = 0
     start_time = time.time()
+    clusters_with_unknown_ref = []
 
-    # Prepare CSV output with streaming
     with open(output_csv, 'w', newline='') as csvfile:
         fieldnames = ['name', 'reference_id', 'reference_length', 'consensus_protein',
                       'mutations', 'mutation_count', 'dna_mutations', 'dna_variant_count',
@@ -420,128 +461,57 @@ def vcf_to_csv_detailed(vcf_file, reference_fasta_or_manager, output_csv,
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
-        # Track clusters with reference issues
-        clusters_with_unknown_ref = []
-
-        # Process each cluster
-        for cluster_name, variants in cluster_variants.items():
-            # Determine which reference to use for this cluster
+        for processed, (cluster_name, variants) in enumerate(cluster_variants.items(), 1):
             cluster_ref_id = cluster_reference_ids.get(cluster_name, default_ref_id)
-
-            # Check if reference exists
             if cluster_ref_id not in ref_sequences:
-                clusters_with_unknown_ref.append((cluster_name, cluster_ref_id))
-                cluster_ref_id = default_ref_id  # Fall back to default
+                if cluster_name not in absent_clusters:
+                    clusters_with_unknown_ref.append((cluster_name, cluster_ref_id))
+                cluster_ref_id = default_ref_id
+            reference_seq = ref_sequences[cluster_ref_id]
+            reference_protein = ref_proteins[cluster_ref_id]
 
-            reference_seq = ref_sequences.get(cluster_ref_id, ref_sequences[default_ref_id])
-            reference_protein = ref_proteins.get(cluster_ref_id, ref_proteins[default_ref_id])
+            if cluster_name in absent_clusters:
+                # The consensus does not contain the gene (e.g. insert-less plasmid)
+                writer.writerow({
+                    'name': cluster_name, 'reference_id': cluster_ref_id,
+                    'reference_length': len(reference_protein), 'consensus_protein': '',
+                    'mutations': 'NO_GENE', 'mutation_count': 0, 'dna_mutations': '',
+                    'dna_variant_count': 0, 'synonymous_count': 0, 'hamming_distance': '',
+                    'premature_stop': '', 'stop_position': '', 'indelsyn': '', 'consensus_dna': '',
+                })
+                continue
 
-            # Apply variants to reference
             consensus_dna = apply_variants_to_reference(reference_seq, variants)
-
-            # Translate consensus to protein
             consensus_protein = translate_dna_to_protein(consensus_dna)
+            annotation = annotate_variants(_variant_tuples(variants, cluster_ref_id), reference_seq)
+            tokens = annotation['tokens']
+            stop_position = _premature_stop(consensus_protein, reference_protein,
+                                            len(consensus_dna) - len(reference_seq))
 
-            # Format mutations in amino acid notation and track DNA mutations
-            mutations_aa = []
-            mutations_dna = []
-            synonymous_count = 0
-
-            for variant in variants:
-                pos_dna = variant['pos']
-                ref_nt = variant['ref']
-                alt_nt = variant['alt']
-                pos_aa = get_amino_acid_position(pos_dna)
-
-                # Record DNA mutation
-                mutations_dna.append(f"{ref_nt}{pos_dna}{alt_nt}")
-
-                # Get the amino acid at this position in reference
-                ref_aa = reference_protein[pos_aa - 1] if pos_aa <= len(reference_protein) else 'X'
-
-                # Get the amino acid at this position in consensus
-                alt_aa = consensus_protein[pos_aa - 1] if pos_aa <= len(consensus_protein) else 'X'
-
-                if ref_aa != alt_aa:
-                    mutation_str = format_mutation_amino_acid(ref_aa, pos_aa, alt_aa)
-                    mutations_aa.append(mutation_str)
-                else:
-                    # DNA change but same AA = synonymous
-                    synonymous_count += 1
-
-            # Calculate metrics
-            hamming_dist = calculate_hamming_distance(reference_protein, consensus_protein)
-            premature_stop = "yes" if has_premature_stop(consensus_protein) else "no"
-            indelsyn = "yes" if has_indels(consensus_dna, str(reference_seq)) else "no"
-
-            # Detect premature stop position
-            stop_pos = consensus_protein.find('*')
-            if stop_pos != -1 and stop_pos < len(consensus_protein) - 1:
-                stop_position = stop_pos + 1  # 1-based
-            else:
-                stop_position = ""
-
-            # Write to CSV immediately (streaming)
             writer.writerow({
                 'name': cluster_name,
                 'reference_id': cluster_ref_id,
                 'reference_length': len(reference_protein),
                 'consensus_protein': consensus_protein,
-                'mutations': '+'.join(mutations_aa) if mutations_aa else 'WT',
-                'mutation_count': len(mutations_aa),
-                'dna_mutations': '+'.join(mutations_dna) if mutations_dna else '',
-                'dna_variant_count': len(mutations_dna),
-                'synonymous_count': synonymous_count,
-                'hamming_distance': hamming_dist,
-                'premature_stop': premature_stop,
-                'stop_position': stop_position,
-                'indelsyn': indelsyn,
+                'mutations': '+'.join(tokens) if tokens else 'WT',
+                'mutation_count': len(tokens),
+                'dna_mutations': '+'.join(f"{v['ref']}{v['pos']}{v['alt']}" for v in variants),
+                'dna_variant_count': len(variants),
+                'synonymous_count': annotation['n_synonymous'],
+                'hamming_distance': calculate_hamming_distance(reference_protein, consensus_protein),
+                'premature_stop': "yes" if stop_position else "no",
+                'stop_position': stop_position or "",
+                'indelsyn': "yes" if annotation['indels'] else "no",
                 'consensus_dna': consensus_dna
             })
 
-            # Progress reporting
-            processed += 1
             if processed % 1000 == 0 or processed == total_clusters:
                 elapsed_time = time.time() - start_time
                 rate = processed / elapsed_time if elapsed_time > 0 else 0
-                progress_percent = (processed / total_clusters) * 100
+                print(f"\rProgress: {processed / total_clusters * 100:.1f}% "
+                      f"({processed:,}/{total_clusters:,}) | Rate: {rate:.0f} clusters/s",
+                      end='', flush=True)
 
-                if rate > 0:
-                    remaining = total_clusters - processed
-                    eta_seconds = remaining / rate
-                    eta_minutes = eta_seconds / 60
-                    eta_hours = eta_minutes / 60
-
-                    if eta_hours >= 1:
-                        eta_str = f"{eta_hours:.1f}h"
-                    elif eta_minutes >= 1:
-                        eta_str = f"{eta_minutes:.1f}m"
-                    else:
-                        eta_str = f"{eta_seconds:.0f}s"
-                else:
-                    eta_str = "unknown"
-
-                # Format elapsed time
-                if elapsed_time >= 3600:
-                    elapsed_str = f"{elapsed_time/3600:.1f}h"
-                elif elapsed_time >= 60:
-                    elapsed_str = f"{elapsed_time/60:.1f}m"
-                else:
-                    elapsed_str = f"{elapsed_time:.0f}s"
-
-                # Progress bar
-                bar_length = 50
-                filled_length = int(bar_length * processed // total_clusters)
-                bar = '█' * filled_length + '-' * (bar_length - filled_length)
-
-                progress_line = (f"\rProgress: |{bar}| {progress_percent:.1f}% "
-                               f"({processed:,}/{total_clusters:,}) | "
-                               f"Rate: {rate:.0f} clusters/s | ETA: {eta_str} | "
-                               f"Elapsed: {elapsed_str}")
-
-                print(progress_line, end='', flush=True)
-
-    # Report any issues
     if clusters_with_unknown_ref:
         print(f"\n\nWARNING: {len(clusters_with_unknown_ref)} cluster(s) had unknown REFERENCE_ID and used default reference:")
         for cluster, ref_id in clusters_with_unknown_ref[:5]:
@@ -552,9 +522,7 @@ def vcf_to_csv_detailed(vcf_file, reference_fasta_or_manager, output_csv,
 
     print(f"\nSuccessfully generated cluster-level CSV: {output_csv}")
 
-    # Generate demultiplexed mutation-level CSV
     if generate_demultiplexed:
-        # Create demultiplexed filename by inserting _mutations before .csv
         base, ext = os.path.splitext(output_csv)
         demux_output = f"{base}_mutations{ext}"
         print(f"\nGenerating mutation-level demultiplexed CSV...")
@@ -567,10 +535,8 @@ def vcf_to_csv_demultiplexed(vcf_file, reference_fasta_or_manager, output_csv):
     """
     Convert combined VCF to demultiplexed CSV with one row per amino acid mutation.
 
-    This format is useful for:
-    - Counting mutation frequency at each position
-    - Comparing mutation patterns across references
-    - Statistical analysis of mutation distributions
+    Substitutions are evaluated per codon against the reference (all SNVs in a
+    codon together); indels get one row each, typed frameshift or in-frame.
 
     Args:
         vcf_file: Path to combined VCF file
@@ -581,143 +547,105 @@ def vcf_to_csv_demultiplexed(vcf_file, reference_fasta_or_manager, output_csv):
     Returns:
         True on success, False on failure
     """
-    # Determine reference mode
-    is_multi_ref = (ReferenceManager is not None and
-                   isinstance(reference_fasta_or_manager, ReferenceManager))
+    try:
+        ref_sequences, ref_proteins, default_ref_id = _load_references(reference_fasta_or_manager)
+    except ValidationError as e:
+        print(f"Error: {e}")
+        return False
 
-    if is_multi_ref:
-        ref_manager = reference_fasta_or_manager
-        ref_sequences: Dict[str, str] = {}
-        ref_proteins: Dict[str, str] = {}
-        for ref_id in ref_manager.get_reference_ids():
-            ref_sequences[ref_id] = ref_manager.get_reference_sequence(ref_id)
-            ref_proteins[ref_id] = ref_manager.get_reference_protein(ref_id)
-        default_ref_id = ref_manager.get_default_reference_id()
-    else:
-        reference_fasta = reference_fasta_or_manager
-        reference_records = list(SeqIO.parse(reference_fasta, "fasta"))
-        if not reference_records:
-            print(f"Error: No sequences found in reference file {reference_fasta}")
-            return False
-
-        reference_seq = str(reference_records[0].seq)
-        default_ref_id = reference_records[0].id
-        ref_sequences = {default_ref_id: reference_seq}
-        ref_proteins = {default_ref_id: translate_dna_to_protein(reference_seq)}
-
-    # Parse VCF - reuse the streaming parser
-    cluster_variants, cluster_reference_ids = parse_vcf_combined_streaming(vcf_file)
-
-    total_clusters = len(cluster_variants)
+    cluster_variants, cluster_reference_ids, absent_clusters = parse_vcf_combined_streaming(vcf_file)
     print(f"\nGenerating demultiplexed mutation table...")
 
-    # Prepare CSV output
+    fieldnames = [
+        'cluster_name', 'reference_id', 'reference_length',
+        'aa_position', 'ref_aa', 'alt_aa', 'mutation',
+        'dna_position', 'ref_nt', 'alt_nt', 'dna_mutation',
+        'codon_position', 'ref_codon', 'alt_codon',
+        'mutation_type', 'is_synonymous'
+    ]
+    blank = {k: '' for k in fieldnames}
+    total_mutations = 0
+    wt_clusters = 0
+    absent_count = 0
+
     with open(output_csv, 'w', newline='') as csvfile:
-        fieldnames = [
-            'cluster_name', 'reference_id', 'reference_length',
-            'aa_position', 'ref_aa', 'alt_aa', 'mutation',
-            'dna_position', 'ref_nt', 'alt_nt', 'dna_mutation',
-            'codon_position', 'ref_codon', 'alt_codon',
-            'mutation_type', 'is_synonymous'
-        ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
-        total_mutations = 0
-        wt_clusters = 0
-
         for cluster_name, variants in cluster_variants.items():
             cluster_ref_id = cluster_reference_ids.get(cluster_name, default_ref_id)
-            reference_seq = ref_sequences.get(cluster_ref_id, ref_sequences[default_ref_id])
-            reference_protein = ref_proteins.get(cluster_ref_id, ref_proteins[default_ref_id])
+            if cluster_ref_id not in ref_sequences:
+                cluster_ref_id = default_ref_id
+            reference_seq = ref_sequences[cluster_ref_id]
+            reference_protein = ref_proteins[cluster_ref_id]
+            common = {'cluster_name': cluster_name, 'reference_id': cluster_ref_id,
+                      'reference_length': len(reference_protein)}
 
+            if cluster_name in absent_clusters:
+                absent_count += 1
+                writer.writerow({**blank, **common, 'mutation': 'NO_GENE', 'mutation_type': 'NO_GENE'})
+                continue
             if not variants:
-                # WT cluster - write a single row indicating no mutations
                 wt_clusters += 1
-                writer.writerow({
-                    'cluster_name': cluster_name,
-                    'reference_id': cluster_ref_id,
-                    'reference_length': len(reference_protein),
-                    'aa_position': '',
-                    'ref_aa': '',
-                    'alt_aa': '',
-                    'mutation': 'WT',
-                    'dna_position': '',
-                    'ref_nt': '',
-                    'alt_nt': '',
-                    'dna_mutation': '',
-                    'codon_position': '',
-                    'ref_codon': '',
-                    'alt_codon': '',
-                    'mutation_type': 'WT',
-                    'is_synonymous': ''
-                })
+                writer.writerow({**blank, **common, 'mutation': 'WT', 'mutation_type': 'WT'})
                 continue
 
-            # Apply variants to get consensus
-            consensus_dna = apply_variants_to_reference(reference_seq, variants)
-            consensus_protein = translate_dna_to_protein(consensus_dna)
+            annotation = annotate_variants(_variant_tuples(variants, cluster_ref_id), reference_seq)
 
-            # Track which AA positions we've already written (to handle multiple DNA changes in same codon)
-            aa_positions_written = set()
-
-            for variant in variants:
-                pos_dna = variant['pos']
-                ref_nt = variant['ref']
-                alt_nt = variant['alt']
-                pos_aa = get_amino_acid_position(pos_dna)
-
-                # Get amino acids
-                ref_aa = reference_protein[pos_aa - 1] if pos_aa <= len(reference_protein) else 'X'
-                alt_aa = consensus_protein[pos_aa - 1] if pos_aa <= len(consensus_protein) else 'X'
-
-                # Get codons
-                ref_codon = get_codon_at_position(reference_seq, pos_aa)
-                alt_codon = get_codon_at_position(consensus_dna, pos_aa)
-
-                # Determine mutation type
-                is_synonymous = (ref_aa == alt_aa)
-                if ref_aa == alt_aa:
+            for codon_no, wt_codon, mut_codon, wt_aa, mut_aa, snvs in annotation['codons']:
+                is_synonymous = wt_aa == mut_aa
+                if is_synonymous:
                     mutation_type = 'synonymous'
-                elif alt_aa == '*':
+                elif mut_aa == '*':
                     mutation_type = 'nonsense'
-                elif ref_aa == '*':
+                elif wt_aa == '*':
                     mutation_type = 'readthrough'
                 else:
                     mutation_type = 'missense'
+                # One row per DNA change for synonymous codons, one per codon otherwise
+                rows = snvs if is_synonymous else snvs[:1]
+                for pos_0, ref_nt, alt_nt in rows:
+                    dna_mutation = (f"{ref_nt}{pos_0 + 1}{alt_nt}" if is_synonymous else
+                                    '+'.join(f"{r}{p + 1}{a}" for p, r, a in snvs))
+                    writer.writerow({
+                        **common,
+                        'aa_position': codon_no, 'ref_aa': wt_aa, 'alt_aa': mut_aa,
+                        'mutation': 'synonymous' if is_synonymous else f"{wt_aa}{codon_no}{mut_aa}",
+                        'dna_position': pos_0 + 1, 'ref_nt': ref_nt, 'alt_nt': alt_nt,
+                        'dna_mutation': dna_mutation,
+                        'codon_position': (pos_0 % 3) + 1,
+                        'ref_codon': wt_codon, 'alt_codon': mut_codon,
+                        'mutation_type': mutation_type,
+                        'is_synonymous': 'yes' if is_synonymous else 'no'
+                    })
+                    total_mutations += 1
 
-                # For non-synonymous mutations, only write once per AA position
-                if not is_synonymous:
-                    if pos_aa in aa_positions_written:
-                        continue
-                    aa_positions_written.add(pos_aa)
-
-                mutation_str = f"{ref_aa}{pos_aa}{alt_aa}" if not is_synonymous else 'synonymous'
-                dna_mutation_str = f"{ref_nt}{pos_dna}{alt_nt}"
-
+            indel_tokens = {(start0, kind, n): (codon_no, token)
+                            for codon_no, token, kind, n, start0 in annotation['indels']}
+            for v in variants:
+                event = _indel_events([(cluster_ref_id, v['pos'], v['ref'], v['alt'])])
+                if not event:
+                    continue
+                start0, kind, n = event[0]
+                codon_no, token = indel_tokens[(start0, kind, n)]
+                frameshift = n % 3 != 0
                 writer.writerow({
-                    'cluster_name': cluster_name,
-                    'reference_id': cluster_ref_id,
-                    'reference_length': len(reference_protein),
-                    'aa_position': pos_aa,
-                    'ref_aa': ref_aa,
-                    'alt_aa': alt_aa,
-                    'mutation': mutation_str,
-                    'dna_position': pos_dna,
-                    'ref_nt': ref_nt,
-                    'alt_nt': alt_nt,
-                    'dna_mutation': dna_mutation_str,
-                    'codon_position': ((pos_dna - 1) % 3) + 1,
-                    'ref_codon': ref_codon,
-                    'alt_codon': alt_codon,
-                    'mutation_type': mutation_type,
-                    'is_synonymous': 'yes' if is_synonymous else 'no'
+                    **blank, **common,
+                    'aa_position': codon_no, 'ref_aa': reference_protein[codon_no - 1],
+                    # Only the first frameshift gets a token; later ones are out of frame anyway
+                    'mutation': token or f"{reference_protein[codon_no - 1]}{codon_no}fs",
+                    'dna_position': v['pos'], 'ref_nt': v['ref'], 'alt_nt': v['alt'],
+                    'dna_mutation': f"{v['ref']}{v['pos']}{v['alt']}",
+                    'mutation_type': ('frameshift' if frameshift else f"inframe_{'deletion' if kind == 'del' else 'insertion'}"),
+                    'is_synonymous': 'no'
                 })
                 total_mutations += 1
 
     print(f"Generated demultiplexed CSV: {output_csv}")
     print(f"  Total mutation rows: {total_mutations:,}")
     print(f"  WT clusters: {wt_clusters:,}")
+    if absent_count:
+        print(f"  Gene-absent clusters: {absent_count:,}")
     return True
 
 

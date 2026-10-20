@@ -440,6 +440,8 @@ def combine_vcf_files(vcf_dir, output_vcf):
             outfile.write("##INFO=<ID=CLUSTER,Number=1,Type=String,Description=\"Cluster ID\">\n")
             outfile.write("##INFO=<ID=VARIANT_COUNT,Number=1,Type=Integer,Description=\"Number of variants in this consensus\">\n")
             outfile.write("##INFO=<ID=REFERENCE_ID,Number=1,Type=String,Description=\"Reference template ID\">\n")
+            outfile.write("##INFO=<ID=WT,Number=0,Type=Flag,Description=\"Marker: consensus has no variants\">\n")
+            outfile.write("##INFO=<ID=GENE_ABSENT,Number=0,Type=Flag,Description=\"Marker: consensus does not contain the gene\">\n")
             outfile.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
 
             # Process each VCF file
@@ -499,6 +501,12 @@ def combine_vcf_files(vcf_dir, output_vcf):
                             wt_info += f"REFERENCE_ID={reference_id};"
                         wt_info += "WT=true"
                         outfile.write(f"{reference_id or 'reference'}\t0\t.\t.\t.\t.\tWT\t{wt_info}\n")
+                    elif not variants and gene_status == 'ABSENT':
+                        absent_info = f"CLUSTER={cluster_name};"
+                        if reference_id:
+                            absent_info += f"REFERENCE_ID={reference_id};"
+                        absent_info += "GENE_ABSENT=true"
+                        outfile.write(f"{reference_id or 'reference'}\t0\t.\t.\t.\t.\tNO_GENE\t{absent_info}\n")
 
                 except Exception as e:
                     print(f"Error processing {vcf_file}: {e}")

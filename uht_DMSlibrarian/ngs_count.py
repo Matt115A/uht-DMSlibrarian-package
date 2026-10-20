@@ -375,6 +375,102 @@ def _indel_events(variants: List[Tuple[str, int, str, str]]) -> List[Tuple[int, 
     return sorted(events)
 
 
+def annotate_variants(variants: List[Tuple[str, int, str, str]], ref) -> Dict[str, object]:
+    """Amino acid annotation of one consensus' variants against a reference.
+
+    Shared by ngs_count (AA_MUTATIONS) and analyze (detailed_mutations.csv) so
+    both always agree. Returns a dict with:
+        tokens: AA mutation tokens sorted by codon, e.g. ['A28V', 'L81fs', 'Q51del1aa']
+        codons: [(codon_no, wt_codon, mut_codon, wt_aa, mut_aa, snvs)] for codons with SNVs
+        indels: [(codon_no, token_or_None, kind, n_bases, start0)] per indel event
+        n_synonymous: number of codons whose SNVs do not change the amino acid
+    """
+    ref = Seq(str(ref))
+    ref_protein = str(ref.translate())
+
+    # FIX: indels were never present in the VCFs. Now they are; keep them
+    # out of the codon-substitution logic and annotate them separately.
+    snvs = [v for v in variants if len(v[2]) == 1 and len(v[3]) == 1]
+    indels = _indel_events(variants)
+
+    # Convert to amino acid mutations - prevariant neess fall within codon
+    codons: Dict[int, List[Tuple[int, str, str]]] = {}
+    for chrom, pos, ref_allele, alt_allele in snvs:
+        pos_0 = pos - 1  # 0-based
+        codon_pos = pos_0 // 3
+        if codon_pos not in codons:
+            codons[codon_pos] = []
+        codons[codon_pos].append((pos_0, ref_allele, alt_allele))
+
+    # (codon number, token) so substitutions and indels sort together
+    aa_tokens: List[Tuple[int, str]] = []
+    codon_info = []
+    indel_info = []
+    n_synonymous = 0
+    for codon_pos in sorted(codons.keys()):
+        codon_start = codon_pos * 3
+        if codon_start + 3 > len(ref):
+            # Codon extends beyond reference, skip this codon
+            continue
+
+        wt_codon = str(ref[codon_start:codon_start + 3])
+        mut_codon = list(wt_codon)
+
+        # Apply all mutations in this codon
+        valid = True
+        for pos_0, ref_allele, alt_allele in codons[codon_pos]:
+            rel_pos = pos_0 - codon_start
+            if rel_pos < 3 and pos_0 < len(ref) and ref[pos_0] == ref_allele:
+                mut_codon[rel_pos] = alt_allele
+            else:
+                valid = False
+                break
+
+        if not valid:
+            # Fallback: record as codon number (amino acid position)
+            wt_aa = str(Seq(wt_codon).translate())
+            aa_tokens.append((codon_pos + 1, f"{wt_aa}{codon_pos + 1}X"))
+            continue
+
+        mut_codon_str = ''.join(mut_codon)
+        wt_aa = str(Seq(wt_codon).translate())
+        mut_aa = str(Seq(mut_codon_str).translate())
+
+        codon_info.append((codon_pos + 1, wt_codon, mut_codon_str, wt_aa, mut_aa, codons[codon_pos]))
+        if wt_aa != mut_aa:
+            # Non-synonymous - record as amino acid
+            aa_tokens.append((codon_pos + 1, f"{wt_aa}{codon_pos + 1}{mut_aa}"))
+        else:
+            # Synonymous (silent) change: not an AA mutation
+            n_synonymous += 1
+
+    # Indel tokens use lowercase suffixes so fitness_analysis's substitution
+    # regex ([A-Z])(\d+)([A-Z*]) does not mistake them for substitutions:
+    #   frameshift   L81fs    (first frameshifting indel only; frame is lost after it)
+    #   in-frame     Q51del1aa / A50ins2aa
+    fs_seen = False
+    for start0, kind, n in indels:
+        codon = min(start0 // 3 + 1, len(ref_protein))
+        wt_aa = ref_protein[codon - 1]
+        token = None
+        if n % 3:
+            if not fs_seen:
+                token = f"{wt_aa}{codon}fs"
+                fs_seen = True
+        else:
+            token = f"{wt_aa}{codon}{kind}{n // 3}aa"
+        if token:
+            aa_tokens.append((codon, token))
+        indel_info.append((codon, token, kind, n, start0))
+
+    return {
+        'tokens': [t for _, t in sorted(aa_tokens, key=lambda x: x[0])],
+        'codons': codon_info,
+        'indels': indel_info,
+        'n_synonymous': n_synonymous,
+    }
+
+
 def collect_all_variant_rows(variants_dir: str) -> Tuple[List[Tuple[str,int,str,str]], Dict[str, List[int]]]:
     """Return list of unique variant keys and mapping from consensus name to indices in that list."""
     unique: Dict[Tuple[str,int,str,str], int] = {}
@@ -448,74 +544,7 @@ def collect_haplotype_rows(variants_dir: str, ref_seq_or_manager) -> Tuple[List[
             index[name] = len(rows) - 1
             continue
 
-        ref_protein = str(ref.translate())
-
-        # FIX: indels were never present in the VCFs. Now they are; keep them
-        # out of the codon-substitution logic and annotate them separately.
-        snvs = [v for v in variants if len(v[2]) == 1 and len(v[3]) == 1]
-        indels = _indel_events(variants)
-
-        # Convert to amino acid mutations - prevariant neess fall within codon
-        codons: Dict[int, List[Tuple[int, str, str]]] = {}
-        for chrom, pos, ref_allele, alt_allele in snvs:
-            pos_0 = pos - 1  # 0-based
-            codon_pos = pos_0 // 3
-            if codon_pos not in codons:
-                codons[codon_pos] = []
-            codons[codon_pos].append((pos_0, ref_allele, alt_allele))
-
-        # (codon number, token) so substitutions and indels sort together
-        aa_tokens: List[Tuple[int, str]] = []
-        for codon_pos in sorted(codons.keys()):
-            codon_start = codon_pos * 3
-            if codon_start + 3 > len(ref):
-                # Codon extends beyond reference, skip this codon
-                continue
-
-            wt_codon = str(ref[codon_start:codon_start + 3])
-            mut_codon = list(wt_codon)
-
-            # Apply all mutations in this codon
-            valid = True
-            for pos_0, ref_allele, alt_allele in codons[codon_pos]:
-                rel_pos = pos_0 - codon_start
-                if rel_pos < 3 and pos_0 < len(ref) and ref[pos_0] == ref_allele:
-                    mut_codon[rel_pos] = alt_allele
-                else:
-                    valid = False
-                    break
-
-            if not valid:
-                # Fallback: record as codon number (amino acid position)
-                wt_aa = str(Seq(wt_codon).translate())
-                aa_tokens.append((codon_pos + 1, f"{wt_aa}{codon_pos + 1}X"))
-                continue
-
-            mut_codon_str = ''.join(mut_codon)
-            wt_aa = str(Seq(wt_codon).translate())
-            mut_aa = str(Seq(mut_codon_str).translate())
-
-            if wt_aa != mut_aa:
-                # Non-synonymous - record as amino acid
-                aa_tokens.append((codon_pos + 1, f"{wt_aa}{codon_pos + 1}{mut_aa}"))
-            # Skip synonymous mutations (silent changes)
-
-        # Indel tokens use lowercase suffixes so fitness_analysis's substitution
-        # regex ([A-Z])(\d+)([A-Z*]) does not mistake them for substitutions:
-        #   frameshift   L81fs    (first frameshifting indel only; frame is lost after it)
-        #   in-frame     Q51del1aa / A50ins2aa
-        fs_seen = False
-        for start0, kind, n in indels:
-            codon = min(start0 // 3 + 1, len(ref_protein))
-            wt_aa = ref_protein[codon - 1]
-            if n % 3:
-                if not fs_seen:
-                    aa_tokens.append((codon, f"{wt_aa}{codon}fs"))
-                    fs_seen = True
-            else:
-                aa_tokens.append((codon, f"{wt_aa}{codon}{kind}{n // 3}aa"))
-
-        aa_muts = [t for _, t in sorted(aa_tokens, key=lambda x: x[0])]
+        aa_muts = annotate_variants(variants, ref)['tokens']
         aa_muts_str = '+'.join(aa_muts) if aa_muts else 'WT'
         rows.append((name, muts_str, aa_muts_str, ref_id))
         index[name] = len(rows) - 1
