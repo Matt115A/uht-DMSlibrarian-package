@@ -9,7 +9,7 @@
 ## Fixed an issue where incomplete UMIs could be extracted from truncated reads
 
 
-from Bio import SeqIO
+from Bio import SeqIO, Align
 from Bio.Seq import Seq
 from skbio.alignment import local_pairwise_align_nucleotide
 from skbio import DNA
@@ -176,50 +176,72 @@ class AlignmentResult:
         self.target_begin = target_begin
         self.target_end_optimal = target_end_optimal
 
-def process_sequence_batch(batch_data):
-    """Process a batch of sequences for multiprocessing."""
-    batch_records, probe_fwd, probe_rev, probe_minaln_score, umi_len, umi_loc = batch_data
-    results = []
-    
-    for record in batch_records:
-        rec_seq = str(record.seq)
-        alnF = align_sequence_fast(probe_fwd, rec_seq)
-        alnR = align_sequence_fast(probe_rev, rec_seq)
-        scoreF = alnF.optimal_alignment_score
-        scoreR = alnR.optimal_alignment_score
-        
-        if scoreF > probe_minaln_score or scoreR > probe_minaln_score:
-            if scoreF > scoreR:
-                # Forward orientation
-                aln = alnF
-                score = scoreF
-            else:
-                # Reverse orientation
-                aln = alnR
-                score = scoreR
-            
-            # Extract UMI based on location
-            if umi_loc == 'up':
-                umi_start = aln.target_begin - umi_len
-                umi_end = aln.target_begin
-            else:  # umi_loc == 'down'
-                umi_start = aln.target_end_optimal
-                umi_end = aln.target_end_optimal + umi_len
-            
-            if umi_start >= 0 and umi_end <= len(rec_seq):
-                umi_seq = rec_seq[umi_start:umi_end]
-                if len(umi_seq) == umi_len:
-                    results.append((record.id, umi_seq, score))
-    
-    return results
+def _make_probe_aligner():
+    """Probe aligner: the whole probe must align, read flanks are free.
 
-def align_sequence_fast(query_seq, target_seq):
-    """Ultra-fast alignment using regex patterns."""
+    Scoring is +1 per match, -1 per mismatch and -3 to open a gap (-1 to
+    extend), so a perfect match scores len(probe), a mismatch costs 2 and an
+    indel 3-4. Gaps cost more than mismatches so that a mismatch next to the
+    UMI is not traded for a gap that would shift the UMI boundary.
+    """
+    aligner = Align.PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.match_score = 1
+    aligner.mismatch_score = -1
+    aligner.open_gap_score = -3
+    aligner.extend_gap_score = -1
+    # Read bases beyond either end of the probe are not penalised
+    try:
+        aligner.end_deletion_score = 0  # Biopython >= 1.86
+    except AttributeError:
+        aligner.query_end_gap_score = 0
+    return aligner
+
+_PROBE_ALIGNER = None
+_MIN_SEED_LEN = 8
+
+def _probe_windows(query, target, max_errors):
+    """Read windows that can contain a probe match with <= max_errors errors.
+
+    Splits the probe into max_errors + 1 chunks; any such match contains at
+    least one chunk exactly (pigeonhole). Returns None if chunks would be too
+    short to be informative, meaning the whole read must be aligned.
+    """
+    L = len(query)
+    k = L // (max_errors + 1)
+    if k < _MIN_SEED_LEN:
+        return None
+    pad = max_errors + 2
+    windows = []
+    for i in range(max_errors + 1):
+        off = i * k
+        chunk = query[off:off + k]
+        hit = target.find(chunk)
+        while hit != -1:
+            windows.append((max(0, hit - off - pad), min(len(target), hit - off + L + pad)))
+            hit = target.find(chunk, hit + 1)
+    windows.sort()
+    merged = []
+    for start, end in windows:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+def align_sequence_fast(query_seq, target_seq, min_score=None):
+    """Locate a probe (query) in a read (target).
+
+    Tries an exact match first and otherwise falls back to an alignment that
+    tolerates mismatches and indels. target_end_optimal is exclusive. If
+    min_score is given, only read regions that could reach it are aligned.
+    """
+    global _PROBE_ALIGNER
     try:
         query_upper = query_seq.upper()
         target_upper = target_seq.upper()
-        
-        # Try exact match first (fastest)
+
+        # Exact match (fastest)
         pos = target_upper.find(query_upper)
         if pos != -1:
             return AlignmentResult(
@@ -228,36 +250,35 @@ def align_sequence_fast(query_seq, target_seq):
                 target_begin=pos,
                 target_end_optimal=pos + len(query_seq)
             )
-        
-        # Try fuzzy matching with regex (allow 1-2 mismatches)
-        query_len = len(query_seq)
-        if query_len > 20:  # Only for longer sequences
-            # Create regex pattern allowing 1-2 mismatches
-            pattern_parts = []
-            for i, char in enumerate(query_upper):
-                if i < query_len - 2:  # Allow mismatches except in last 2 positions
-                    pattern_parts.append(f"[{char}]")
-                else:
-                    pattern_parts.append(char)
-            
-            pattern = ''.join(pattern_parts)
-            regex = re.compile(pattern)
-            
-            for match in regex.finditer(target_upper):
-                # Count actual matches
-                matches = sum(1 for i, char in enumerate(query_upper) 
-                            if target_upper[match.start() + i] == char)
-                
-                if matches >= query_len * 0.8:  # At least 80% match
-                    return AlignmentResult(
-                        score=matches * 2,
-                        target_sequence=target_seq,
-                        target_begin=match.start(),
-                        target_end_optimal=match.end()
-                    )
-        
-        return AlignmentResult(0, target_seq, 0, 0)
-            
+
+        if _PROBE_ALIGNER is None:
+            _PROBE_ALIGNER = _make_probe_aligner()
+
+        windows = None
+        if min_score is not None:
+            # Every error costs at least 2, which bounds the number of errors
+            max_errors = max(0, int(len(query_upper) - min_score) // 2)
+            windows = _probe_windows(query_upper, target_upper, max_errors)
+        if windows is None:
+            windows = [[0, len(target_upper)]]
+
+        best = None
+        for start, end in windows:
+            region = target_upper[start:end]
+            score = _PROBE_ALIGNER.score(region, query_upper)
+            if best is None or score > best[0]:
+                best = (score, start, region)
+        if best is None or best[0] <= 0 or (min_score is not None and best[0] < min_score):
+            return AlignmentResult(max(best[0], 0) if best else 0, target_seq, 0, 0)
+        score, start, region = best
+        blocks = _PROBE_ALIGNER.align(region, query_upper)[0].aligned[0]
+        return AlignmentResult(
+            score=score,
+            target_sequence=target_seq,
+            target_begin=start + int(blocks[0][0]),
+            target_end_optimal=start + int(blocks[-1][1])
+        )
+
     except Exception:
         return AlignmentResult(0, target_seq, 0, 0)
 
@@ -298,7 +319,8 @@ def extract_left(aln):
     return umi_begin, umi_end
 
 def extract_right(aln):
-    umi_begin = aln.target_end_optimal + 1
+    # target_end_optimal is exclusive, so the UMI starts right there
+    umi_begin = aln.target_end_optimal
     umi_end = umi_begin + umi_len
     return umi_begin, umi_end
 
@@ -342,12 +364,12 @@ if __name__ == '__main__' and mode == 'UMIextract':
         with open_file_stream(input_file) as file_handle:
             for record in parse_fastq_stream(file_handle):
                 rec_seq = str(record.seq)
-                alnF = align_sequence_fast(probe_fwd, rec_seq)
-                alnR = align_sequence_fast(probe_rev, rec_seq)
+                alnF = align_sequence_fast(probe_fwd, rec_seq, probe_minaln_score)
+                alnR = align_sequence_fast(probe_rev, rec_seq, probe_minaln_score)
                 scoreF = alnF.optimal_alignment_score
                 scoreR = alnR.optimal_alignment_score
                 #Check basic alignment score
-                if scoreF > probe_minaln_score or scoreR > probe_minaln_score:  
+                if scoreF >= probe_minaln_score or scoreR >= probe_minaln_score:
                     if scoreF > scoreR: #Target in fwd orientation
                         #Get umi location
                         if umi_loc == 'down':
@@ -355,7 +377,7 @@ if __name__ == '__main__' and mode == 'UMIextract':
                         elif umi_loc == 'up':
                             umi_begin, umi_end = extract_left(alnF)   #FWD of upstream is left
                         #append to UMI to record list
-                        if umi_end < len(alnF.target_sequence) and umi_begin > 0: #UMI could be out of bounds
+                        if umi_begin >= 0 and umi_end <= len(alnF.target_sequence): #UMI could be out of bounds
                             umi = alnF.target_sequence[umi_begin:umi_end]
                             # Write directly to output file with orientation info in header
                             output_handle.write(f">{record.id} orientation=forward\n{umi}\n")
@@ -369,7 +391,7 @@ if __name__ == '__main__' and mode == 'UMIextract':
                         elif umi_loc == 'up':
                             umi_begin, umi_end = extract_right(alnR)   #REV of upstream is right
                         #append to UMI to record list
-                        if umi_begin > 0 and umi_end < len(alnR.target_sequence): #UMI could be out of bounds
+                        if umi_begin >= 0 and umi_end <= len(alnR.target_sequence): #UMI could be out of bounds
                             umiR = alnR.target_sequence[umi_begin:umi_end]
                             # Write directly to output file with orientation info in header
                             umi_revcomp = str(Seq(umiR).reverse_complement())
@@ -381,7 +403,9 @@ if __name__ == '__main__' and mode == 'UMIextract':
                     bad_aln += 1
                 count += 1
 
-                # Print progress for every sequence
+                # Print progress every 10,000 sequences
+                if count % 10000:
+                    continue
                 elapsed_time = time.time() - start_time
                 seq_per_sec = count / elapsed_time if elapsed_time > 0 else 0
                 success_rate = (success / count) * 100 if count > 0 else 0
@@ -395,7 +419,7 @@ if __name__ == '__main__' and mode == 'UMIextract':
     print_progress(count, total_estimated, start_time, success, bad_aln, short_aln)
     print()  # New line after progress
     print('\nUMIs extracted: %d' % success)
-    print("Discarded: %.2f%%:" % ((bad_aln+short_aln)/count * 100))
+    print("Discarded: %.2f%%:" % ((bad_aln+short_aln)/max(count, 1) * 100))
     print("Bad alignment: %d" % bad_aln)
     print("Incomplete UMI: %d" % short_aln)
 

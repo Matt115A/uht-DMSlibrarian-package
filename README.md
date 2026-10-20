@@ -61,7 +61,7 @@ conda install -c bioconda cd-hit abpoa minimap2 bcftools
 **UMI Extraction:**
 - `--umi_len` (default: 52): Length of the UMI in base pairs
 - `--umi_loc` (default: 'up'): Location of UMI relative to probe. Options: 'up' (upstream) or 'down' (downstream)
-- `--min_probe_score` (default: 15): Minimum alignment score required for probe matching. For a 50bp probe, perfect match = 50. Lower values accept more mismatches.
+- `--min_probe_score` (default: 15): Minimum alignment score required for probe matching (inclusive). A perfect match scores the probe length (e.g. 50 for a 50 bp probe); each mismatch costs 2 and each indel 3-4, so lower values accept more sequencing errors in the probe. Setting it to the probe length accepts exact matches only. Probe-free reads score well below half the probe length.
 
 **Clustering:**
 - `--fast` (default: True): Use fast CD-HIT clustering (recommended)
@@ -332,7 +332,7 @@ umic-seq-pacbio fitness \
 ### Threshold Selection Guide
 
 **Quick reference:**
-- **High-quality data**: For a 50 bp probe, use `--min_probe_score 30-40`
+- **Probe score**: Probe length minus 4 tolerates two mismatches or one indel (e.g. `--min_probe_score 23` for a 27 bp probe, 46 for a 50 bp probe)
 - **Q30+ data**: Use `--identity 0.85-0.90`
 - **Rare variant detection**: Lower `--size_thresh` (e.g., 3)
 - **High-confidence only**: Higher `--size_thresh` (e.g., 20)
