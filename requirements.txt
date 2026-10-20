@@ -1,4 +1,4 @@
-# Frozen dependencies for uht-dmslibrarian v0.2.11
+# Frozen dependencies for uht-dmslibrarian v0.2.12
 # Exact versions from working conda environment
 
 biopython==1.86
